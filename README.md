@@ -1,14 +1,16 @@
-# Fred.AI - RAG Agent with ReAct
+# Finance.AI - RAG Agent with ReAct
 
 RAG (Retrieval-Augmented Generation) system specialized in finance and economics, featuring a ReAct agent for iterative reasoning and action.
 
 ## 🎯 Features
 
-- **RAG Agent V2**: Semantic search in financial documents
-- **ReAct Agent**: Reasoning and action loop with up to 3 iterations
-- **Financial Tools**: Stock prices, comparison, document search
-- **Intelligent Validation**: Verifies if responses are relevant to the domain
-- **Response Synthesis**: Combines multiple iterations without redundancy
+- **ReactAgent Framework**: Generic, reusable agent framework with explicit reasoning
+- **RAG Agent V3**: Specialized implementation for finance using the new framework
+- **ReAct Loop**: Explicit "Observe-Reason-Act" loop with up to 3 iterations
+- **Smart Validation**: Analysis step after each tool call to verify if the query was fully answered
+- **Financial Tools**: Semantic search, real-time stock prices (Yahoo Finance), and comparison
+- **Local PDF Processing**: Endpoint to process PDFs locally using **Docling**, preserving layout and semantics
+- **Decoupled Architecture**: Clean separation between generic agent logic and domain-specific tools
 
 ## 🏗️ Architecture
 
@@ -18,34 +20,22 @@ RAG (Retrieval-Augmented Generation) system specialized in finance and economics
 └────────┬────────┘
          │
          ▼
-┌─────────────────┐
-│  Context Agent  │ ← Extracts intent
-└────────┬────────┘
-         │
-         ▼
 ┌─────────────────────────────────┐
-│      ReAct Loop (max 3x)        │
+│     Generic ReactAgent Loop     │
 │  ┌──────────────────────────┐   │
-│  │ 1. Tool Calling Agent    │   │
-│  │ 2. Execute 1 Tool        │   │
-│  │ 3. ReAct Analysis        │   │
-│  │ 4. Decide: Continue/Retry│   │
+│  │ 1. Tool Selection (LLM)  │   │
+│  │ 2. Tool Execution        │   │
+│  │ 3. Explicit Reasoning    │←──┼── Uses _analyze_progress
+│  │    (Critic Step)         │   │   to decide next move:
+│  │                          │   │   - Continue (Finish)
+│  │                          │   │   - Retry (Refine Query)
+│  │                          │   │   - Switch Tool
 │  └──────────────────────────┘   │
 └────────┬────────────────────────┘
          │
          ▼
 ┌─────────────────┐
-│ Response Synth  │ ← Combines responses
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│Validation Agent │ ← Validates domain
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Final Response │
+│ Final Synthesis │ ← Combines all observations
 └─────────────────┘
 ```
 
@@ -54,7 +44,6 @@ RAG (Retrieval-Augmented Generation) system specialized in finance and economics
 ### 1. Clone the repository
 ```bash
 git clone https://github.com/fredstrey/react_agent.git
-cd Fred.AI
 ```
 
 ### 2. Create virtual environment
@@ -84,29 +73,24 @@ docker run -p 6333:6333 qdrant/qdrant
 ## 📦 Project Structure
 
 ```
-Fred.AI/
+Finance.AI/
+├── ReactAgent/                # GENERIC FRAMEWORK
+│   ├── agent.py               # Core ReAct Logic
+│   ├── decorators.py          # @tool decorator
+│   ├── executor.py            # Tool Executor
+│   ├── registry.py            # Tool Registry
+│   └── context.py             # Execution Context
 ├── agents/
-│   ├── context_agent.py      # Intent extraction
-│   ├── rag_agent_v2.py        # Main RAG Agent
-│   ├── react_agent.py         # ReAct: Reasoning + Acting
-│   └── validation_agent.py    # Domain validation
-├── api/
-│   └── api.py                 # FastAPI endpoints
-├── core/
-│   ├── tool_calling_agent.py  # Base for tool calling
-│   ├── execution_context.py   # Execution context
-│   ├── registry.py            # Tool registry
-│   └── executor.py            # Tool executor
-├── embedding_manager/
-│   └── embedding_manager.py   # Embeddings manager
-├── providers/
-│   ├── openrouter.py          # OpenRouter provider
-│   └── openrouter_function_caller.py
+│   ├── rag_agent_v3.py        # Finance Agent (implements ReactAgent)
+│   └── ...
 ├── tools/
-│   └── rag_tools.py           # RAG tools
+│   ├── rag_tools_v3.py        # Financial Tools (@tool decorated)
+│   └── ...
+├── api/
+│   └── api.py                 # FastAPI (Async with run_in_threadpool)
 └── examples/
-    ├── add_finance_docs.py    # Add documents
-    └── test_react_agent.py    # ReAct tests
+    ├── rag_v3_demo.py         # Main Demo
+    └── ...
 ```
 
 ## 🛠️ Available Tools
@@ -145,6 +129,16 @@ curl -X POST http://localhost:8000/stream \
   -H "Content-Type: application/json" \
   -d '{"message": "What is the price of AAPL and who defines the Selic rate?"}'
 ```
+**Or try the dubious vibecoded html frontend :D**
+
+![alt text](image.png)
+
+### Process PDF (Locally with Docling)
+```bash
+curl -X POST http://localhost:8000/process_pdf \
+  -H "Content-Type: application/json" \
+  -d '{"pdf_path": "C:/path/to/doc.pdf", "max_tokens": 500}'
+```
 
 ### Add documents
 ```bash
@@ -177,12 +171,10 @@ Response: "AAPL: $273.76. COPOM defines the Selic rate."
 ## ⚙️ Configuration
 
 ### LLM Models
-Configured in `agents/rag_agent_v2.py`:
+Configured in `agents/rag_agent_v3.py`:
 ```python
-RAGAgentV2(
-    tool_caller_model="xiaomi/mimo-v2-flash:free",
-    response_model="xiaomi/mimo-v2-flash:free",
-    context_model="xiaomi/mimo-v2-flash:free",
+RAGAgentV3(
+    model="xiaomi/mimo-v2-flash:free",
     max_iterations=3  # ReAct iterations
 )
 ```
