@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Union, Any
 
 
 # =========================
@@ -33,13 +33,13 @@ class SearchResponse(BaseModel):
 class RAGResponse(BaseModel):
     """Final response validated by RAG agent"""
     answer: str = Field(..., description="User's question answer")
-    sources_used: List[str] = Field(
+    sources_used: List[Any] = Field(
         default_factory=list,
         description="List of sources/documents used to generate the response"
     )
-    confidence: Optional[str] = Field(
+    confidence: Optional[Union[str, float]] = Field(
         None,
-        description="Confidence level in the response (high/medium/low)"
+        description="Confidence level in the response (high/medium/low or score)"
     )
 
 

@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="User message")
     conversation_id: Optional[str] = Field(None, description="Conversation ID")
     stream: bool = Field(default=True, description="If streaming should be used")
+    max_iterations: int = Field(default=3, description="Maximum number of reasoning steps (max_iterations)")
     chat_history: Optional[List[ChatMessage]] = Field(default=None, description="Chat history (last 3 interactions)")
 
 

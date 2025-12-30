@@ -3,6 +3,7 @@ API FastAPI with ReAct Agent
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from sse_starlette.sse import EventSourceResponse
 import json
 import uuid
@@ -19,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from api_schemas import ChatRequest, ChatResponse, ProcessPDFRequest, ProcessPDFResponse
 from embedding_manager.embedding_manager import EmbeddingManager
-from agents.rag_agent_v2 import RAGAgentV2
+from agents.rag_agent_v3 import RAGAgentV3
 from pdf_pipeline.pdf_processor import PDFProcessor
 
 # Initialize FastAPI
@@ -139,16 +140,18 @@ async def stream_chat(request: ChatRequest):
                 print("📜 [DEBUG] Nenhum chat history recebido")
             
             # Create new instance of RAG Agent V2 with history
-            rag_agent = RAGAgentV2(
+            rag_agent = RAGAgentV3(
                 embedding_manager=embedding_manager,
-                tool_caller_model="xiaomi/mimo-v2-flash:free",
-                response_model="xiaomi/mimo-v2-flash:free",
-                context_model="xiaomi/mimo-v2-flash:free"
+                model="xiaomi/mimo-v2-flash:free",
+                max_iterations=request.max_iterations 
             )
             
             
+            
             # Execute RAG Agent V2 with history
-            response, contexto = rag_agent.run(
+            # Run blocking synchronous code in a threadpool to avoid blocking the event loop
+            response, contexto = await run_in_threadpool(
+                rag_agent.run,
                 query=request.message,
                 chat_history=chat_history
             )
