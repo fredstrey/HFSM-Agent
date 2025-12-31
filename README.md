@@ -24,21 +24,34 @@ stateDiagram-v2
     Start --> RouterState
 
     state "Reasoning Layer" as Reasoning {
-        RouterState --> ToolState : Needs Data
-        RouterState --> AnswerState : Has Answer
+        RouterState
     }
 
     state "Execution Layer" as Execution {
-        ToolState --> ValidationState : With Validation (Optional)
-        ToolState --> AnswerState : Skip Validation (Default)
-        ValidationState --> AnswerState : Valid
-        ValidationState --> RetryState : Invalid
+        ToolState
+        ValidationState
     }
 
     state "Recovery Layer" as Recovery {
-        RetryState --> RouterState : Retry
-        RetryState --> AnswerState : Max Retries (Best Effort)
+        RetryState
     }
+    
+    state "Terminal Layer" as Terminal {
+        AnswerState
+        FailState
+    }
+
+    RouterState --> ToolState : Needs Data
+    RouterState --> AnswerState : Has Answer
+
+    ToolState --> ValidationState : With Validation (Optional)
+    ToolState --> AnswerState : Skip Validation (Default)
+
+    ValidationState --> AnswerState : Valid
+    ValidationState --> RetryState : Invalid
+
+    RetryState --> RouterState : Retry
+    RetryState --> AnswerState : Max Retries (Best Effort)
 
     AnswerState --> [*]
     AnswerState --> FailState : Error
