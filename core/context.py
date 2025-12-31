@@ -45,24 +45,32 @@ class ExecutionContext(BaseModel):
     def snapshot(self) -> Dict[str, Any]:
         """
         Create a serializable snapshot of the current context.
-        Excludes non-serializable objects from memory if possible, 
-        or assumes memory is largely JSON-safe.
+        Manually constructs dict to absolutely ensure no non-serializable objects (like LLMClient) are included.
         """
-        # We use model_dump(mode='json') to handle datetime and basic types
-        data = self.model_dump(mode='json')
+        # Manual construction is safer than model_dump when we have mixed types in memory
+        data = {
+            "user_query": self.user_query,
+            "tool_calls": self.tool_calls,
+            "current_iteration": self.current_iteration,
+            "max_iterations": self.max_iterations,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "metrics": self.metrics,
+            "memory": {} 
+        }
+
+        unsafe_keys = ["llm", "registry", "executor", "thread_pool", "agent"]
         
-        # Manually filter known non-serializable keys from memory to be safe
-        # (e.g. llm client, executor references if stored there)
-        if "memory" in data:
-            keys_to_remove = ["llm", "registry", "executor", "thread_pool"]
-            for k in keys_to_remove:
-                data["memory"].pop(k, None)
-                
+        if self.memory:
+            for k, v in self.memory.items():
+                if k not in unsafe_keys:
+                    data["memory"][k] = v
+                    
         return data
+
     @classmethod
     def load_from_snapshot(cls, snapshot: Dict[str, Any]) -> 'ExecutionContext':
         """
         Create an ExecutionContext instance from a snapshot dictionary.
         """
-        # Pydantic automatically handles type coercion for datetime fields etc.
         return cls(**snapshot)

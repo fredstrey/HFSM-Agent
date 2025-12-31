@@ -1,8 +1,17 @@
+from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from pydantic import ValidationError
 from .registry import ToolRegistry
 
-class ToolExecutor:
+class IToolExecutor(ABC):
+    """Interface for tool execution strategies."""
+    
+    @abstractmethod
+    def execute(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a tool and return structured result."""
+        pass
+
+class ToolExecutor(IToolExecutor):
     """Safely executes tools registered in the ToolRegistry"""
     
     def __init__(self, registry: Optional[ToolRegistry] = None):

@@ -10,8 +10,8 @@ from typing import Generator, Optional, List, Dict, Any, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.context import ExecutionContext
+from core.executor import IToolExecutor
 
-# Setup logging
 # Setup logging
 logger = logging.getLogger("AgentEngine")
 logger.setLevel(logging.INFO)
@@ -29,7 +29,7 @@ if not logger.handlers:
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
-# 🔹 Phase 9: Transition Map
+# 🔹 Transition Map
 ALLOWED_TRANSITIONS = {
     "Start": ["RouterState"],
     "RouterState": ["ToolState", "AnswerState"],
@@ -41,7 +41,7 @@ ALLOWED_TRANSITIONS = {
 }
 
 # =================================================================================================
-# 🔹 Phase 1: Hierarchy Fundamentals
+# 🔹 Hierarchy Fundamentals
 # =================================================================================================
 
 class HierarchicalState(ABC):
@@ -75,7 +75,7 @@ class HierarchicalState(ABC):
         raise Exception(f"State provider for {type_name} not found in hierarchy.")
 
 # =================================================================================================
-# 🔹 Phase 1.5: Context Policy & Pruning
+# 🔹 Context Policy & Pruning
 # =================================================================================================
 
 class ContextPruner:
@@ -110,8 +110,9 @@ class ContextPruner:
                 if not is_recent and len(raw_result) > 200:
                     call_copy["result"] = raw_result[:200] + "... [TRUNCATED - OLD CONTEXT]"
                 
-                pruned_calls.append(call_copy)
+            pruned_calls.append(call_copy)
             
+            logger.info(f"✂️ [Pruner] Original calls: {len(context.tool_calls)} | Pruned view: {len(pruned_calls)}")
             context.set_memory("active_tool_calls", pruned_calls)
 
 class ContextPolicyState(HierarchicalState):
@@ -125,7 +126,6 @@ class ContextPolicyState(HierarchicalState):
 
     def on_enter(self, context: ExecutionContext):
         # Trigger pruning
-        # print("✂️ [Policy] Enforcing context limits...")
         self.pruner.prune(context)
         active_calls = context.get_memory("active_tool_calls", [])
         if active_calls:
@@ -169,7 +169,7 @@ class TerminalState(HierarchicalState):
         return None # Delegate to parent
 
 # =================================================================================================
-# 🔹 Phase 4: Migrate Substates
+# 🔹Migrate Substates
 # =================================================================================================
 
 class RouterState(ReasoningState):
@@ -181,14 +181,14 @@ class RouterState(ReasoningState):
     def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
         system_instruction = context.get_memory("system_instruction", "")
         
-        messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": context.user_query},
-        ]
-
-        # Reconstruct chat history if available (not implemented generically in context yet)
-        if hasattr(context, "chat_history") and context.chat_history:
-             pass
+        messages = [{"role": "system", "content": system_instruction}]
+        
+        # Inject Chat History
+        history = context.get_memory("chat_history", [])
+        if history:
+            messages.extend(history)
+            
+        messages.append({"role": "user", "content": context.user_query})
 
         # Reconstruct history with tool calls (PRUNED FOR ROUTER via ContextPolicy)
         # We look for "active_tool_calls" which is populated by ContextPolicyState
@@ -253,7 +253,7 @@ class RouterState(ReasoningState):
         return AnswerState(self.parent.find_state_by_type("TerminalState"), self.llm)
 
 class ToolState(ExecutionState):
-    def __init__(self, parent: HierarchicalState, executor, max_workers: int = 4):
+    def __init__(self, parent: HierarchicalState, executor: IToolExecutor, max_workers: int = 4):
         super().__init__(parent)
         self.executor = executor
         self.pool = ThreadPoolExecutor(max_workers=max_workers)
@@ -280,7 +280,11 @@ class ToolState(ExecutionState):
             call = futures_map[future]
             try:
                 result_map = future.result()
-                result = result_map.get("result") if result_map.get("success") else result_map.get("error")
+                # If no nested 'result', use the map itself
+                if result_map.get("success"):
+                     result = result_map.get("result", result_map) 
+                else: 
+                     result = result_map.get("error")
                 logger.info(f"✅ [Tool] Result for {call['function']['name']}: {str(result)[:100]}...")
             except Exception as e:
                 result = str(e)
@@ -306,6 +310,15 @@ class ValidationState(ExecutionState):
 
     def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
         logger.info("🔍 [Validation] Checking data...")
+        
+        # Bypass validation if the last tool was a redirect (deliberate exit)
+        # We check the last *executed* tool call in context
+        if context.tool_calls:
+            last_call = context.tool_calls[-1]
+            if last_call.get("tool_name") == "redirect":
+                logger.info("✅ [Validation] Redirect detected. Skipping logic check.")
+                return AnswerState(self.parent.find_state_by_type("TerminalState"), self.llm)
+
         prompt = f"""
         Você é um validador lógico.
         Verifique se as informações coletadas são suficientes para responder.
@@ -358,7 +371,7 @@ class RetryState(RecoveryState):
         logger.warning(f"⚠️ [Retry] Attempting recovery...")
         retry_count = context.get_memory("retry_count", 0)
         
-        # Configurable Retries (Phase 12)
+        # Configurable Retries
         # Check specific config -> global config -> default
         config = context.get_memory("state_config", {}).get("RetryState", {})
         max_retries = config.get("max_retries", context.get_memory("max_retries", 2))
@@ -394,10 +407,14 @@ class AnswerState(TerminalState):
         logger.debug(f"📝 [Answer] Tool calls in context: {len(context.tool_calls)}")
         
         system_instruction = context.get_memory("system_instruction", "")
-        messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": context.user_query},
-        ]
+        messages = [{"role": "system", "content": system_instruction}]
+        
+        # Inject Chat History
+        history = context.get_memory("chat_history", [])
+        if history:
+            messages.extend(history)
+
+        messages.append({"role": "user", "content": context.user_query})
         
         # Append tool interactions to context
         for call in context.tool_calls:
@@ -435,7 +452,7 @@ class FailState(TerminalState):
         return None 
 
 # =================================================================================================
-# 🔹 Phase 2 & 8: Generic Engine
+# 🔹 Generic Engine
 # =================================================================================================
 
 class AgentEngine:
@@ -473,6 +490,19 @@ class AgentEngine:
         self.terminal = TerminalState(self.policy)
         self.states["TerminalState"] = self.terminal
         
+        # Core operational states
+        self.router_state = RouterState(self.reasoning, self.llm, self.registry)
+        self.states["RouterState"] = self.router_state
+        
+        self.answer_state = AnswerState(self.reasoning, self.llm)
+        self.states["AnswerState"] = self.answer_state
+        
+        self.retry_state = RetryState(self.execution)
+        self.states["RetryState"] = self.retry_state
+        
+        self.fail_state = FailState(self.root)
+        self.states["FailState"] = self.fail_state
+        
         # Allow states to verify/find peers (basic service locator via root)
         self.root.find_state_by_type = self._find_state_provider
 
@@ -503,7 +533,6 @@ class AgentEngine:
         
         # Validation
         valid_targets = ALLOWED_TRANSITIONS.get(from_name, [])
-        # We also allow transitions if 'to_name' is a substate of allowed targets?
         # Simpler check: if mapped, check exact. If not mapped (like abstract/middleware), skipped.
         if from_name in ALLOWED_TRANSITIONS:
              if to_name not in valid_targets and "FailState" not in to_name:
@@ -519,7 +548,7 @@ class AgentEngine:
         try:
             snapshot = context.snapshot()
             
-            # Phase 10: Disk Persistence
+            # Disk Persistence
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"snapshot_{timestamp}_{event_name}.json"
             directory = "logs/snapshots"
@@ -573,7 +602,7 @@ class AgentEngine:
                 
                 # Delegate to parent
                 if state.parent:
-                    # logger.debug(f"⬆️ Delegating from {state.__class__.__name__} to {state.parent.__class__.__name__}")
+                    logger.debug(f"⬆️ Delegating from {state.__class__.__name__} to {state.parent.__class__.__name__}")
                     state = state.parent
                 else:
                     # Root reached and returned None -> Stop or Error?
@@ -609,15 +638,10 @@ class AgentEngine:
             context.set_memory("registry", self.registry)
             context.set_memory("executor", self.executor)
             
-            # Determine start state (naive: start at Router for safety)
-            # In a real system, we might persist 'current_state' in memory and map back.
-            start_state = RouterState(self.reasoning, self.llm, self.registry)
+            # Determine start state (use registered instance)
+            start_state = self.router_state
             
             # Start loop
-            # This duplicates run_stream logic partially, ideally refactor common loop.
-            # For now, inline loop logic or call internal runner? 
-            # run_stream initializes context. Here context exists.
-            # We can refactor run_stream to accept context.
             return self._run_loop(start_state, context)
             
         except Exception as e:
@@ -674,7 +698,7 @@ class AgentEngine:
         context.set_memory("registry", self.registry)
         context.set_memory("executor", self.executor)
 
-        # Initial State
-        current_state = RouterState(self.reasoning, self.llm, self.registry)
+        # Initial State (use registered instance)
+        current_state = self.router_state
         
         return self._run_loop(current_state, context)

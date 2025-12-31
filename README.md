@@ -1,248 +1,437 @@
-# Finance.AI - Dual Architecture Agent System
+# Finance.AI - Production-Grade HFSM Agent Framework
 
-Finance.AI is a sophisticated RAG (Retrieval-Augmented Generation) system specialized in finance and economics. It now features **two distinct agent architectures**, allowing you to choose between deterministic control and autonomous reasoning.
+Finance.AI is a sophisticated financial assistant powered by a **Hierarchical Finite State Machine (HFSM)** architecture. Built for production use with enterprise-grade features: context pruning, validation, retry logic, persistence, and comprehensive observability.
 
-## 🧠 Two Core Architectures
+## 🏗️ Architecture Overview
 
-### 1. Finite State Machine (FSM) Agent
-**Best for**: Production environments requiring strict control, predictability, and efficiency.
-- **Deterministic**: Follows a predefined state flow (Route → Call Tool → Answer).
-- **Prompt Engineering**: Uses text-based JSON structured prompts logic.
-- **Endpoint**: `/strem_fsm`
-- **Implementation**: `finitestatemachineAgent` package.
+### Hierarchical FSM (HFSM) Engine
 
-### 2. Hierarchical FSM (HSM) Agent [NEW] ⚡
-**Best for**: High-performance streaming and native API integration.
-- **Native Tool Calling**: Uses the LLM's native `tool_calls` API instead of text parsing.
-- **Streaming & Telemetry**: Real-time token usage tracking (`In/Out`) and streaming.
-- **Hierarchical**: Decomposed into superstates (`Reasoning`, `Execution`, `Recovery`, `Terminal`) and substates (`Router`, `Tool`, `Validation`, `Answer`).
-- **Endpoint**: `/stream` (Default for Frontend Demo)
-- **Implementation**: `finitestatemachineAgent/hfsm_agent.py`.
+The core of Finance.AI is a **hierarchical state machine** that provides deterministic, controllable, and observable execution flow:
 
-### 3. ReAct Agent (Reasoning + Acting)
-**Best for**: Complex research, multi-step reasoning, and exploratory tasks.
-- **Autonomous**: The LLM decides the next step based on observations.
-- **Flexible**: Can refine queries, switch strategies, and self-correct dynamically.
-- **Deep Reasoning**: Performs an explicit analysis step after each action.
-- **Endpoint**: `/stream_react`
-- **Implementation**: `ReactAgent` package.
+```mermaid
+stateDiagram-v2
+    [*] --> Start
+    Start --> RouterState
+    
+    state "Reasoning Layer" as Reasoning {
+        RouterState --> ToolState : Needs Data
+        RouterState --> AnswerState : Has Answer
+    }
+    
+    state "Execution Layer" as Execution {
+        ToolState --> ValidationState
+        ValidationState --> RouterState : Valid
+        ValidationState --> RetryState : Invalid
+    }
+    
+    state "Recovery Layer" as Recovery {
+        RetryState --> RouterState : Retry
+        RetryState --> FailState : Max Retries
+    }
+    
+    AnswerState --> [*]
+    FailState --> [*]
+```
+
+### Key Features
+
+- ✅ **Hierarchical States**: Organized into superstates (Reasoning, Execution, Recovery, Terminal)
+- ✅ **Context Pruning**: Automatic token management to stay within LLM limits
+- ✅ **Validation Layer**: Ensures tool outputs are valid before proceeding
+- ✅ **Retry Logic**: Automatic recovery from failed tool calls
+- ✅ **Persistence**: Snapshots saved at every state transition
+- ✅ **Observability**: Comprehensive logging, metrics, and telemetry
+- ✅ **Streaming**: Real-time token streaming with usage tracking
+- ✅ **Extensible**: Easy to add custom states and tools
 
 ---
 
-## 🎯 Features
+## 🚀 Quick Start
 
-- **Triple Architecture**: Choose between FSM, HSM, or ReAct.
-- **Telemetry**: Real-time token usage display in chat interface.
-- **RAG Integration**: Specialized implementations for all architectures.
-- **Financial Tools**: Semantic search, real-time stock prices (Yahoo Finance), and comparison.
-- **Local PDF Processing**: Endpoint to process PDFs locally using **Docling**.
-- **Decoupled Architecture**: Clean separation between core logic (`core/`), specific agents (`agents/`), and tools (`tools/`).
+### 1. Installation
 
-## 🏗️ Architectures Compared
-
-### HSM Architecture (Hierarchical)
-```mermaid
-stateDiagram-v2
-    [*] --> ReasoningState
-    
-    state ReasoningState {
-        [*] --> RouterState
-        RouterState --> ExecutionState : Needs Info
-        RouterState --> TerminalState : Has Answer
-    }
-
-    state ExecutionState {
-        [*] --> ToolState
-        ToolState --> ValidationState
-        ValidationState --> [*] : Valid
-        ValidationState --> RecoveryState : Invalid
-    }
-
-    state RecoveryState {
-        [*] --> RetryState
-        RetryState --> ReasoningState : Retry
-        RetryState --> TerminalState : Give Up
-    }
-
-    state TerminalState {
-        AnswerState --> [*]
-        FailState --> [*]
-    }
-```
-
-### ReAct Architecture (LLM is Autonomous)
-```
-┌──────────────────────────────────────────────┐
-│          Step-by-Step Reasoning Loop         │
-│  ┌────────────────────────────────────────┐  │
-│  │ 1. 🤔 Thought (Analyze Context)        │  │
-│  │ 2. 🛠️ Action (Select Tool & Args)     │  │
-│  │ 3. 📉 Observation (Tool Output)        │  │
-│  └───────────────────┬────────────────────┘  │
-│                      │                       │
-│            ┌─────────┴──────────┐            │
-│            ▼                    ▼            │
-│      [Need Info?]         [Have Answer?]     │
-│            │                    │            │
-│      (Repeat Loop)        (Final Answer)     │
-└──────────────────────────────────────────────┘
-```
-
-## 🚀 Installation
-
-### 1. Clone the repository
 ```bash
+# Clone repository
 git clone https://github.com/fredstrey/react_agent.git
-```
+cd Finance.AI
 
-### 2. Create virtual environment
-```bash
+# Create virtual environment
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # or
 venv\Scripts\activate  # Windows
-```
 
-### 3. Install dependencies
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
-Create `.env` file:
+### 2. Configuration
+
+Create a `.env` file:
 ```env
 OPENROUTER_API_KEY=your_key_here
 ```
 
-### 5. Start Qdrant (Docker)
+### 3. Start Services
+
 ```bash
+# Start Qdrant (vector database)
+docker-compose up -d
+
+# Or manually:
 docker run -p 6333:6333 qdrant/qdrant
 ```
+
+### 4. Run the API
+
+```bash
+python api/api.py
+```
+
+The API will be available at `http://localhost:8000`
+
+### 5. Try the Frontend
+
+Open `frontend/chat.html` in your browser for a beautiful chat interface with:
+- Real-time streaming responses
+- Token usage display (Input/Output)
+- Source tracking
+- Confidence indicators
+
+---
 
 ## 📦 Project Structure
 
 ```
 Finance.AI/
-├── core/                      # SHARED COMPONENTS
-│   ├── context.py             # Execution Context
-│   ├── registry.py            # Tool Registry
-│   ├── executor.py            # Tool Executor
-│   └── schemas.py             # Data Schemas
-├── finitestatemachineAgent/   # FSM ARCHITECTURE
-│   ├── fsm_agent.py           # State Logic
-│   └── ...
-├── ReactAgent/                # REACT ARCHITECTURE
-│   ├── agent.py               # Autonomous Logic
-│   └── ...
-├── agents/                    # AGENT IMPLEMENTATIONS
-│   ├── rag_agent_fsm.py       # Finance Agent (FSM Version)
-│   ├── rag_agent_v3.py        # Finance Agent (ReAct Version)
-│   └── ...
-├── tools/
-│   ├── rag_tools_v3.py        # Financial Tools (@tool decorated)
-│   └── ...
-├── api/
-│   └── api.py                 # FastAPI Interface
-└── examples/
-    └── rag_example.py         # Main Demo
+├── core/                          # Framework Core
+│   ├── context.py                 # Execution Context & Memory
+│   ├── registry.py                # Tool Registry
+│   ├── executor.py                # Tool Executor
+│   ├── decorators.py              # @tool decorator
+│   └── schemas.py                 # Data Models
+│
+├── finitestatemachineAgent/       # HFSM Engine
+│   └── hfsm_agent.py              # State Machine Implementation
+│
+├── agents/                        # Domain-Specific Agents
+│   └── rag_agent_hfsm.py          # Finance Agent (Production)
+│
+├── tools/                         # Domain Tools
+│   ├── rag_tools.py               # Financial Tools (search, stocks)
+│   └── rag_schemas.py             # Tool Schemas
+│
+├── providers/                     # LLM Providers
+│   ├── llm_client.py              # Unified LLM Client
+│   ├── openrouter.py              # OpenRouter Provider
+│   └── openrouter_function_caller.py
+│
+├── embedding_manager/             # RAG Components
+│   └── embedding_manager.py       # Qdrant Integration
+│
+├── api/                           # FastAPI Server
+│   ├── api.py                     # Main API
+│   └── api_schemas.py             # Request/Response Models
+│
+├── frontend/                      # Web Interface
+│   └── chat.html                  # Chat UI
+│
+├── examples/                      # Learning Examples
+│   ├── README.md                  # Tutorial
+│   ├── customer_support_agent.py  # Complete Agent Example
+│   └── demo_custom_agent.py       # Custom States Example
+│
+├── logs/                          # Execution Logs
+│   └── snapshots/                 # State Snapshots (JSON)
+│
+├── docs/                          # Technical Documentation
+│   ├── technical_report_fsm_agent.md
+│   └── technical_report_react_agent.md
+│
+└── docker-compose.yml             # Container Orchestration
 ```
+
+---
 
 ## 🛠️ Available Tools
 
-### 1. `search_documents`
-Semantic search in financial documents
+### Financial Tools
+
+#### 1. `search_documents`
+Semantic search in financial knowledge base (Qdrant)
 ```python
-search_documents(query="What is the Selic rate?")
+search_documents(query="What are the responsibilities of COPOM?")
+# Returns: Top-3 relevant document chunks with scores
 ```
 
-### 2. `get_stock_price`
-Get price of ONE stock
+#### 2. `get_stock_price`
+Get real-time price for a **single** stock
 ```python
-get_stock_price(ticker="AAPL")
+get_stock_price(ticker="AAPL", period="1mo")
+# Returns: Current price, change %, high/low, market cap
 ```
 
-### 3. `compare_stocks`
-Compare MULTIPLE stocks
+#### 3. `compare_stocks`
+Compare performance of **multiple** stocks
 ```python
-compare_stocks(tickers=["AAPL", "MSFT", "GOOGL"])
+compare_stocks(tickers=["NVDA", "TSLA", "MSFT"], period="1y")
+# Returns: Ranked performance, best/worst performers
 ```
 
-### 4. `redirect`
-Indicates that question is out of scope
+#### 4. `redirect`
+Indicates question is out of financial scope
+```python
+redirect(reason="Question about sports, not finance")
+```
 
-## 🎮 Usage
+---
 
-### Start API
+## 🎮 Usage Examples
+
+### API Endpoints
+
+#### Stream Chat (Main Endpoint)
 ```bash
-python api/api.py
+curl -X POST http://localhost:8000/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Compare NVDA and TSLA performance over 1 year",
+    "chat_history": []
+  }'
 ```
 
-### Make request (Choose your Architecture)
-
-#### 1. HFSM Agent (Default - Native Streaming)
-```bash
-curl -X POST http://localhost:8000/stream ...
-```
-
-#### 2. FSM Agent (Legacy)
-```bash
-curl -X POST http://localhost:8000/strem_fsm ...
-```
-
-#### 3. ReAct Agent (Autonomous)
-```bash
-curl -X POST http://localhost:8000/stream_react ...
-```
-
-**Or try the dubious vibecoded html frontend :D**
-> ℹ️ **Note**: The frontend (`chat.html`) is configured to use the **`/stream` (HFSM Agent)** endpoint by default for the best streaming experience.
-
-![alt text](image 1.png)
-
-![alt text](image 2.png)
-
-### Process PDF (Locally with Docling)
+#### Process PDF
 ```bash
 curl -X POST http://localhost:8000/process_pdf \
   -H "Content-Type: application/json" \
-  -d '{"pdf_path": "C:/path/to/doc.pdf", "max_tokens": 500}'
+  -d '{
+    "pdf_path": "/path/to/document.pdf",
+    "max_tokens": 500
+  }'
 ```
+
+### Python SDK
+
+```python
+from agents.rag_agent_hfsm import RAGAgentFSMStreaming
+from embedding_manager.embedding_manager import EmbeddingManager
+
+# Initialize
+embedding_manager = EmbeddingManager()
+agent = RAGAgentFSMStreaming(
+    embedding_manager=embedding_manager,
+    model="xiaomi/mimo-v2-flash:free"
+)
+
+# Run query
+token_stream, context = agent.run_stream(
+    query="What's the current price of NVDA?",
+    chat_history=[]
+)
+
+# Stream response
+for token in token_stream:
+    print(token, end="", flush=True)
+
+# Access metadata
+print(f"\nSources: {context.get_memory('sources_used')}")
+print(f"Confidence: {context.get_memory('confidence')}")
+```
+
+---
+
+## 🧪 Learning Examples
+
+The `examples/` directory contains complete, runnable examples:
+
+### 1. Customer Support Agent
+**File**: `examples/customer_support_agent.py`
+
+A complete agent implementation showing:
+- How to define domain-specific tools
+- How to wrap `AgentEngine` in a custom class
+- Production-ready pattern (like `rag_agent_hfsm.py`)
+
+```bash
+python examples/customer_support_agent.py
+```
+
+### 2. Travel Agent with Custom States
+**File**: `examples/demo_custom_agent.py`
+
+Advanced example demonstrating:
+- How to create custom states (`VisaCheckState`)
+- How to modify the execution flow
+- When to use custom states vs just tools
+
+```bash
+python examples/demo_custom_agent.py
+```
+
+See `examples/README.md` for detailed tutorials.
+
+---
+
+## 🐳 Docker Deployment
+
+### Using Docker Compose
+
+```bash
+# Build and start all services
+docker-compose up --build
+
+# Services:
+# - hfsm_agent: Main API (port 8000)
+# - hfsm_agent_qdrant: Vector DB (port 6333)
+```
+
+### Manual Docker
+
+```bash
+# Build image
+docker build -t finance-ai .
+
+# Run container
+docker run -p 8000:8000 \
+  -e OPENROUTER_API_KEY=your_key \
+  finance-ai
+```
+
+---
 
 ## ⚙️ Configuration
 
-### Switching Models
-Configured in `agents/rag_agent_fsm.py` or `rag_agent_v3.py`:
-```python
-# FSM Agent
-RAGAgentFSM(
-    model="xiaomi/mimo-v2-flash:free",
-    max_steps=10
-)
+### Model Selection
 
-# ReAct Agent
-RAGAgentV3(
-    model="xiaomi/mimo-v2-flash:free",
-    max_iterations=3
+Edit `agents/rag_agent_hfsm.py`:
+```python
+RAGAgentFSMStreaming(
+    embedding_manager=embedding_manager,
+    model="xiaomi/mimo-v2-flash:free"  # Change model here
 )
 ```
 
-## 📊 Implemented Features
+Supported models (via OpenRouter):
+- `xiaomi/mimo-v2-flash:free` (Default, fast)
+- `google/gemini-2.0-flash-exp:free`
+- `anthropic/claude-3.5-sonnet`
+- Any OpenRouter-compatible model
 
-✅ **Dual Architecture Core** (FSM + ReAct)  
-✅ **Deterministic State Flow** (FSM)  
-✅ **Autonomous Reasoning Loop** (ReAct)  
-✅ Sequential tool execution  
-✅ Multi-part query detection  
-✅ Context accumulation  
-✅ Intelligent response synthesis  
-✅ Domain validation (finance/economics)  
+### Context Pruning
+
+Adjust in `finitestatemachineAgent/hfsm_agent.py`:
+```python
+class ContextPruner:
+    def __init__(self, strategy="cut_last_n", keep_recent=4):
+        # keep_recent: Number of recent tool calls to keep full results
+```
+
+---
+
+## 📊 Observability
+
+### Logs
+
+All execution logs are saved to `logs/`:
+- `agent.log`: Main application log
+- `snapshots/`: JSON snapshots at every state transition
+
+### Metrics
+
+Available in `context.metrics`:
+- `state_visits`: Count of visits per state
+- `prompt_tokens`: Input tokens used
+- `completion_tokens`: Output tokens generated
+- `total_tokens`: Total token usage
+
+### Snapshots
+
+Every state transition saves a snapshot:
+```json
+{
+  "user_query": "...",
+  "tool_calls": [...],
+  "current_iteration": 2,
+  "metrics": {...},
+  "memory": {...}
+}
+```
+
+---
+
+## 🔧 Extending the Framework
+
+### Adding New Tools
+
+1. Create tool function with `@tool` decorator:
+```python
+from core.decorators import tool
+
+@tool(
+    name="my_custom_tool",
+    description="What this tool does"
+)
+def my_custom_tool(arg1: str, arg2: int) -> Dict[str, Any]:
+    # Implementation
+    return {"success": True, "data": ...}
+```
+
+2. Register in your agent:
+```python
+registry.register(
+    name=my_custom_tool._tool_name,
+    description=my_custom_tool._tool_description,
+    function=my_custom_tool,
+    args_model=my_custom_tool._args_model
+)
+```
+
+### Adding Custom States
+
+See `examples/demo_custom_agent.py` for a complete example.
+
+---
 
 ## 🐛 Troubleshooting
 
-### Qdrant won't connect
+### Qdrant Connection Failed
 ```bash
-docker run -p 6333:6333 qdrant/qdrant
+# Ensure Qdrant is running
+docker ps | grep qdrant
+
+# Restart if needed
+docker-compose restart hfsm_agent_qdrant
 ```
 
-### Invalid API Key
-Check `.env` file and configure `OPENROUTER_API_KEY`
+### Import Errors in Examples
+Examples use `sys.path.insert` to find modules. Run from project root:
+```bash
+python examples/customer_support_agent.py
+```
+
+### API Key Invalid
+Check `.env` file exists and contains valid key:
+```bash
+cat .env
+# Should show: OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+---
+
+## 📚 Documentation
+
+- **Architecture Deep Dive**: `docs/technical_report_fsm_agent.md`
+- **Examples Tutorial**: `examples/README.md`
+- **API Reference**: See docstrings in `api/api.py`
+
+---
+
+## 🤝 Contributing
+
+This is a learning/research project. Feel free to fork and experiment!
+
+---
+
+## 📄 License
+
+MIT License - See LICENSE file for details.

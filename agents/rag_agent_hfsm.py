@@ -2,7 +2,7 @@ from typing import List, Dict, Optional, Generator
 from finitestatemachineAgent.hfsm_agent import AgentEngine
 from core.context import ExecutionContext
 
-import tools.rag_tools_v3 as rag_tools
+import tools.rag_tools as rag_tools
 from tools.rag_schemas import RAGResponse
 from core.registry import ToolRegistry
 from core.executor import ToolExecutor
@@ -38,8 +38,12 @@ class RAGAgentFSMStreaming:
         llm = LLMClient(model=model)
 
         system_instruction = """
-Você é um assistente financeiro especialista.
-Use ferramentas apenas se necessário.
+Você é o Finance.AI, um assistente financeiro especialista.
+
+REGRAS CRITICAS:
+1. Para conceitos econômicos, definições e contexto (ex: Selic, Copom, Inflação, PIB), SEMPRE use 'search_documents'. NUNCA use 'redirect' para temas econômicos.
+2. Para cotações e performance de ativos (ex: PETR4, NVDA, comparações), SEMPRE use 'get_stock_price' ou 'compare_stocks'.
+3. Use 'redirect' APENAS para assuntos totalmente fora de finanças (ex: futebol, receitas, piadas).
 """
 
         self.agent = AgentEngine(
@@ -55,7 +59,7 @@ Use ferramentas apenas se necessário.
         chat_history: Optional[List[Dict[str, str]]] = None
     ) -> tuple[Generator[str, None, None], ExecutionContext]:
 
-        token_stream, context = self.agent.run_stream(query)
+        token_stream, context = self.agent.run_stream(query, chat_history=chat_history)
 
         def wrapped_gen():
             answer = []
