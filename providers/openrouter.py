@@ -84,7 +84,7 @@ class OpenRouterProvider:
         else:
             return self._sync_chat(payload, headers)
     
-    def _sync_chat(self, payload: Dict, headers: Dict) -> str:
+    def _sync_chat(self, payload: Dict, headers: Dict) -> Dict:
         """Synchronous chat request"""
         response = requests.post(
             f"{self.base_url}/chat/completions",
@@ -96,9 +96,12 @@ class OpenRouterProvider:
         response.raise_for_status()
         
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        return {
+            "content": data["choices"][0]["message"]["content"],
+            "usage": data.get("usage", {})
+        }
     
-    def _stream_chat(self, payload: Dict, headers: Dict) -> str:
+    def _stream_chat(self, payload: Dict, headers: Dict) -> Dict:
         """Streaming chat request"""
         response = requests.post(
             f"{self.base_url}/chat/completions",
@@ -109,6 +112,8 @@ class OpenRouterProvider:
         response.raise_for_status()
         
         full_response = ""
+        usage = {}
+        
         for line in response.iter_lines():
             if line:
                 line = line.decode('utf-8')
@@ -128,13 +133,16 @@ class OpenRouterProvider:
                             if content:
                                 full_response += content
                         
-                        # Track reasoning tokens if available
-                        if "usage" in data and "reasoningTokens" in data["usage"]:
-                            print(f"\n[OpenRouter] Reasoning tokens: {data['usage']['reasoningTokens']}")
+                        # Track usage if available
+                        if "usage" in data:
+                            usage = data["usage"]
                     except:
                         pass
         
-        return full_response
+        return {
+            "content": full_response,
+            "usage": usage
+        }
     
     def chat_with_tools(
         self,
@@ -143,13 +151,6 @@ class OpenRouterProvider:
     ) -> Dict:
         """
         Chat with function calling support
-        
-        Args:
-            messages: Chat messages
-            tools: Tool definitions
-            
-        Returns:
-            Response dict with content and optional tool_calls
         """
         payload = {
             "model": self.model,
@@ -176,7 +177,8 @@ class OpenRouterProvider:
         
         result = {
             "content": message.get("content", ""),
-            "tool_calls": message.get("tool_calls")
+            "tool_calls": message.get("tool_calls"),
+            "usage": data.get("usage", {})
         }
         
         return result

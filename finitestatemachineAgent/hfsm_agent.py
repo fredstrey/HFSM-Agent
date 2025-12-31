@@ -1,32 +1,94 @@
 from __future__ import annotations
 
 import json
-from enum import Enum
+from abc import ABC, abstractmethod
+from typing import Generator, Optional, List, Dict, Any, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Generator, Optional
 
 from core.context import ExecutionContext
 
-class AgentState(str, Enum):
-    ROUTER = "router"
-    TOOL = "tool"
-    VALIDATION = "validation"
-    RETRY = "retry"
-    ANSWER = "answer"
-    FAIL = "fail"
+# =================================================================================================
+# 🔹 Phase 1: Hierarchy Fundamentals
+# =================================================================================================
 
+class HierarchicalState(ABC):
+    """
+    Base class for all states in the Hierarchical Finite State Machine.
+    Supports parent-child relationships and delegation.
+    """
+    def __init__(self, parent: Optional[HierarchicalState] = None):
+        self.parent = parent
 
-class SubFSM:
-    def run(self, context: ExecutionContext):
-        raise NotImplementedError
+    @abstractmethod
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        """
+        Process the current context and return the next state.
+        If None is returned, the event is delegated to the parent.
+        """
+        pass
 
+    def on_enter(self, context: ExecutionContext):
+        """Optional hook called when entering this state."""
+        pass
 
-class RouterFSM(SubFSM):
-    def __init__(self, llm, registry):
+    def on_exit(self, context: ExecutionContext):
+        """Optional hook called when exiting this state."""
+        pass
+
+    def find_state_by_type(self, type_name: str) -> HierarchicalState:
+        """Traverse up the hierarchy to find a state provider."""
+        if self.parent:
+            return self.parent.find_state_by_type(type_name)
+        raise Exception(f"State provider for {type_name} not found in hierarchy.")
+
+# =================================================================================================
+# 🔹 Phase 3: Define Superstates (Parents)
+# =================================================================================================
+
+class AgentRootState(HierarchicalState):
+    """
+    The root of the hierarchy. Handles global issues (fatal errors, generic fallbacks).
+    Doesn't have a parent.
+    """
+    def __init__(self):
+        super().__init__(parent=None)
+
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        # If we reached the root without a transition, it's a deadlock or failure.
+        print("❌ [Root] No state handled the context. Terminating.")
+        return FailState(self)
+        
+class ReasoningState(HierarchicalState):
+    """Parent for logic that involves thinking/routing."""
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        return None # Delegate to parent
+
+class ExecutionState(HierarchicalState):
+    """Parent for tool execution and validation."""
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        return None # Delegate to parent
+
+class RecoveryState(HierarchicalState):
+    """Parent for handling retries and errors."""
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        return None # Delegate to parent
+
+class TerminalState(HierarchicalState):
+    """Marker for final states (Answer/Fail). Stops the engine."""
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        return None # Delegate to parent
+
+# =================================================================================================
+# 🔹 Phase 4: Migrate Substates
+# =================================================================================================
+
+class RouterState(ReasoningState):
+    def __init__(self, parent: HierarchicalState, llm, registry):
+        super().__init__(parent)
         self.llm = llm
         self.registry = registry
 
-    def run(self, context: ExecutionContext) -> AgentState:
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
         system_instruction = context.get_memory("system_instruction", "")
         
         messages = [
@@ -34,9 +96,18 @@ class RouterFSM(SubFSM):
             {"role": "user", "content": context.user_query},
         ]
 
-        for call in context.tool_calls:
-            # Reconstruct the assistant message that triggered this tool
-            tool_call_id = f"call_{call['tool_name']}_{call.get('iteration', 0)}" # Simple deterministic ID
+        # Reconstruct chat history if available (not implemented generically in context yet)
+        if hasattr(context, "chat_history") and context.chat_history:
+             pass
+
+        # Reconstruct history with tool calls (PRUNED FOR ROUTER)
+        # Strategy: Keep full content only for the last 2 interactions. Truncate others.
+        total_calls = len(context.tool_calls)
+        for i, call in enumerate(context.tool_calls):
+            # Check if this is a "recent" call (e.g., last 2)
+            is_recent = (total_calls - i) <= 4
+            
+            tool_call_id = f"call_{call['tool_name']}_{call.get('iteration', 0)}_{i}"
             
             messages.append({
                 "role": "assistant",
@@ -53,9 +124,13 @@ class RouterFSM(SubFSM):
                 ]
             })
 
-            # Safely handle result serialization
             try:
-                content_str = json.dumps(call.get("result", ""), ensure_ascii=False)
+                raw_result = str(call.get("result", ""))
+                # PRUNING LOGIC
+                if not is_recent and len(raw_result) > 200:
+                    content_str = raw_result[:200] + "... [TRUNCATED - OLD CONTEXT]"
+                else:
+                    content_str = raw_result
             except:
                 content_str = str(call.get("result", ""))
                 
@@ -66,27 +141,40 @@ class RouterFSM(SubFSM):
                 "content": content_str
             })
 
+        print("🧠 [Router] Thinking...")
         response = self.llm.chat_with_tools(
             messages=messages,
             tools=self.registry.to_openai_format()
         )
+        
+        # Accumulate usage
+        usage = response.get("usage", {})
+        total_usage = context.get_memory("total_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+        total_usage["completion_tokens"] += usage.get("completion_tokens", 0)
+        total_usage["total_tokens"] += usage.get("total_tokens", 0)
+        context.set_memory("total_usage", total_usage)
 
         if response.get("tool_calls"):
             context.set_memory("pending_tool_calls", response["tool_calls"])
-            return AgentState.TOOL
+            # Transition to ToolState (which is under ExecutionState)
+            return ToolState(self.parent.find_state_by_type("ExecutionState"), context.get_memory("executor"))
 
         context.set_memory("last_llm_content", response.get("content", ""))
-        return AgentState.ANSWER
+        return AnswerState(self.parent.find_state_by_type("TerminalState"), self.llm)
 
-
-class ToolFSM(SubFSM):
-    def __init__(self, executor, max_workers: int = 4):
+class ToolState(ExecutionState):
+    def __init__(self, parent: HierarchicalState, executor, max_workers: int = 4):
+        super().__init__(parent)
         self.executor = executor
         self.pool = ThreadPoolExecutor(max_workers=max_workers)
 
-    def run(self, context: ExecutionContext) -> AgentState:
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
         futures_map = {}
         pending_calls = context.get_memory("pending_tool_calls", [])
+
+        if not pending_calls:
+             return None 
 
         for call in pending_calls:
             name = call["function"]["name"]
@@ -95,7 +183,7 @@ class ToolFSM(SubFSM):
             except:
                 args = {}
             
-            print(f"🛠️ [ToolFSM] Executing: {name}")
+            print(f"🛠️ [Tool] Executing: {name}")
             future = self.pool.submit(self.executor.execute, name, args)
             futures_map[future] = call
 
@@ -116,42 +204,64 @@ class ToolFSM(SubFSM):
             context.add_tool_call(name, args, result)
 
         context.set_memory("pending_tool_calls", [])
-        return AgentState.VALIDATION
+        
+        return ValidationState(self.parent, context.get_memory("llm"))
 
 
-class ValidationFSM(SubFSM):
-    def __init__(self, llm):
+class ValidationState(ExecutionState):
+    def __init__(self, parent: HierarchicalState, llm):
+        super().__init__(parent)
         self.llm = llm
 
-    def run(self, context: ExecutionContext) -> AgentState:
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        print("🔍 [Validation] Checking data...")
         prompt = f"""
-Você é um validador lógico.
-Verifique se as informações coletadas são suficientes para responder.
-
-PERGUNTA:
-{context.user_query}
-
-DADOS:
-{json.dumps(context.tool_calls, ensure_ascii=False, default=str)}
-
-Responda apenas:
-{{"valid": true}} ou {{"valid": false}}
-"""
+        Você é um validador lógico.
+        Verifique se as informações coletadas são suficientes para responder.
+        
+        PERGUNTA:
+        {context.user_query}
+        
+        DADOS:
+        {json.dumps(context.tool_calls, ensure_ascii=False, default=str)}
+        
+        Responda apenas:
+        {{"valid": true}} ou {{"valid": false}}
+        """
 
         try:
-            response = self.llm.chat([{"role": "user", "content": prompt}])
-            # Clean response
-            clean_resp = response.replace("```json", "").replace("```", "").strip()
+            response_dict = self.llm.chat([{"role": "user", "content": prompt}])
+            
+            # Accumulate usage
+            usage = response_dict.get("usage", {})
+            total_usage = context.get_memory("total_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            total_usage["completion_tokens"] += usage.get("completion_tokens", 0)
+            total_usage["total_tokens"] += usage.get("total_tokens", 0)
+            context.set_memory("total_usage", total_usage)
+            
+            response_content = response_dict.get("content", "")
+            
+            clean_resp = response_content.replace("```json", "").replace("```", "").strip()
             result = json.loads(clean_resp)
             is_valid = result.get("valid", False)
         except:
             is_valid = False
 
-        return AgentState.ANSWER if is_valid else AgentState.RETRY
+        if is_valid:
+             # Go to Answer
+             return AnswerState(self.parent.find_state_by_type("TerminalState"), self.llm)
+        else:
+             # Go to Retry
+             return RetryState(self.parent.find_state_by_type("RecoveryState"))
 
 
-class RetryFSM(SubFSM):
-    def run(self, context: ExecutionContext) -> AgentState:
+class RetryState(RecoveryState):
+    def __init__(self, parent: HierarchicalState):
+        super().__init__(parent)
+
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        print("⚠️ [Retry] Attempting recovery...")
         retry_count = context.get_memory("retry_count", 0)
         max_retries = context.get_memory("max_retries", 2)
         
@@ -159,65 +269,73 @@ class RetryFSM(SubFSM):
         context.set_memory("retry_count", retry_count)
         
         if retry_count > max_retries:
-            return AgentState.FAIL
+            print("❌ [Retry] Max retries reached.")
+            return FailState(self.parent.find_state_by_type("TerminalState"))
 
         context.user_query = f"Refine melhor:\n{context.user_query}"
-        return AgentState.ROUTER
-
-
-class AnswerFSM(SubFSM):
-    def __init__(self, llm):
-        self.llm = llm
-
-    def run(self, context: ExecutionContext) -> Generator[str, None, None]:
-        system_instruction = context.get_memory("system_instruction", "")
         
+        # Back to Router (in Reasoning)
+        return RouterState(self.parent.find_state_by_type("ReasoningState"), context.get_memory("llm"), context.get_memory("registry"))
+
+
+class AnswerState(TerminalState):
+    def __init__(self, parent: HierarchicalState, llm):
+        super().__init__(parent)
+        self.llm = llm
+        self.generator = None
+
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        """
+        Constructs the final prompt with full context and initializes the streaming generator.
+        
+        This state does NOT return a next state immediately. It prepares the generator
+        which the AgentEngine will yield from.
+        """
+        print("✅ [Answer] Generating...")
+        
+        system_instruction = context.get_memory("system_instruction", "")
         messages = [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": context.user_query},
         ]
-
-        # Add collected tool outputs
+        
+        # Append tool interactions to context
         for call in context.tool_calls:
-            # Reconstruct the assistant message that triggered this tool
             tool_call_id = f"call_{call['tool_name']}_{call.get('iteration', 0)}"
-            
             messages.append({
                 "role": "assistant",
                 "content": None, 
                 "tool_calls": [
-                    {
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": call["tool_name"],
-                            "arguments": json.dumps(call["arguments"], ensure_ascii=False)
-                        }
-                    }
+                    {"id": tool_call_id, "type": "function", "function": {"name": call["tool_name"], "arguments": json.dumps(call["arguments"])}}
                 ]
             })
+            content_str = str(call.get("result", ""))
+            messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": call["tool_name"], "content": content_str})
 
-            # Safely handle result
-            try:
-                content_str = json.dumps(call.get("result", ""), ensure_ascii=False)
-            except:
-                content_str = str(call.get("result", ""))
-                
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "name": call["tool_name"],
-                "content": content_str
-            })
-
-        # Append a final system instruction forcing synthesis
         messages.append({
             "role": "system",
             "content": "Based on the tool results above, provide a clear and direct answer to the user's question. Do NOT call any more tools. Just answer."
         })
 
-        yield from self.llm.chat_stream(messages)
+        # Generator that streams and updates context usage side-effect
+        self.generator = self.llm.chat_stream(messages, context=context)
+        return None # Stay here / Finish
 
+class FailState(TerminalState):
+    def __init__(self, parent: HierarchicalState):
+        super().__init__(parent)
+        self.generator = None
+
+    def handle(self, context: ExecutionContext) -> Optional[HierarchicalState]:
+        print("❌ [Fail] Terminating.")
+        def fail_gen():
+            yield "Erro: Não foi possível obter as informações necessárias após várias tentativas."
+        self.generator = fail_gen()
+        return None 
+
+# =================================================================================================
+# 🔹 Phase 2 & 8: Generic Engine
+# =================================================================================================
 
 class AgentEngine:
     def __init__(
@@ -227,56 +345,94 @@ class AgentEngine:
         executor,
         system_instruction: str = ""
     ):
+        self.llm = llm
+        self.registry = registry
+        self.executor = executor
         self.system_instruction = system_instruction
+        
+        # Initialize Hierarchy Root
+        self.root = AgentRootState()
+        self.reasoning = ReasoningState(self.root)
+        self.execution = ExecutionState(self.root)
+        self.recovery = RecoveryState(self.root)
+        self.terminal = TerminalState(self.root)
+        
+        # Allow states to verify/find peers (basic service locator via root)
+        # In a cleaner implementation, we would inject these fully.
+        self.root.find_state_by_type = self._find_state_provider
 
-        self.router = RouterFSM(llm, registry)
-        self.tool = ToolFSM(executor)
-        self.validation = ValidationFSM(llm)
-        self.retry = RetryFSM()
-        self.answer = AnswerFSM(llm)
+    def _find_state_provider(self, type_name: str) -> HierarchicalState:
+        if type_name == "ReasoningState": return self.reasoning
+        if type_name == "ExecutionState": return self.execution
+        if type_name == "RecoveryState": return self.recovery
+        if type_name == "TerminalState": return self.terminal
+        return self.root
+
+    def dispatch(self, state: HierarchicalState, context: ExecutionContext) -> HierarchicalState:
+        """
+        The generic dispatch loop. Bubbles events up if handle() returns None.
+        Returns the NEXT state.
+        """
+        start_state = state
+        while state:
+            next_state = state.handle(context)
+            if next_state:
+                return next_state # Transition found
+            
+            # Delegate to parent
+            if state.parent:
+                # print(f"⬆️ Delegating from {state.__class__.__name__} to {state.parent.__class__.__name__}")
+                state = state.parent
+            else:
+                # Root reached and returned None -> Stop or Error?
+                # If it's TerminalState, it's fine.
+                if isinstance(start_state, TerminalState):
+                    return start_state 
+                return FailState(self.root) # Fallback
+
+        return FailState(self.root)
 
     def run_stream(
-        self,
+        self, 
         query: str,
         chat_history: Optional[list] = None
     ) -> tuple[Generator[str, None, None], ExecutionContext]:
-
-        context = ExecutionContext(
-            user_query=query,
-        )
-        # Initialize memory
+        
+        context = ExecutionContext(user_query=query)
         context.set_memory("system_instruction", self.system_instruction)
         context.set_memory("chat_history", chat_history or [])
         context.set_memory("retry_count", 0)
         context.set_memory("max_retries", 2)
         context.set_memory("pending_tool_calls", [])
+        
+        # Inject dependencies into memory for states to access when recreating siblings
+        context.set_memory("llm", self.llm)
+        context.set_memory("registry", self.registry)
+        context.set_memory("executor", self.executor)
 
-        state = AgentState.ROUTER
+        # Initial State
+        current_state = RouterState(self.reasoning, self.llm, self.registry)
 
         while True:
-            print(f"🔄 [FSM] State: {state}")
+            # print(f"🔄 [Engine] Current State: {current_state.__class__.__name__}")
             
-            if state == AgentState.ROUTER:
-                state = self.router.run(context)
+            # Dispatch returns the NEW state (or the same if terminal)
+            next_state = self.dispatch(current_state, context)
+            
+            # Check if Terminal
+            if isinstance(next_state, TerminalState):
+                # Ensure generator is ready
+                gen = next_state.generator
+                if not gen:
+                     # Should have been set in handle()
+                     next_state.handle(context) 
+                     gen = next_state.generator
+                
+                # CLEANUP: Remove non-serializable objects from memory before returning context to API
+                context.memory.pop("llm", None)
+                context.memory.pop("registry", None)
+                context.memory.pop("executor", None)
+                
+                return gen, context
 
-            elif state == AgentState.TOOL:
-                state = self.tool.run(context)
-
-            elif state == AgentState.VALIDATION:
-                print("🔍 [FSM] Validating...")
-                state = self.validation.run(context)
-
-            elif state == AgentState.RETRY:
-                print("⚠️ [FSM] Retrying...")
-                state = self.retry.run(context)
-
-            elif state == AgentState.ANSWER:
-                print("✅ [FSM] Answering...")
-                return self.answer.run(context), context
-
-            elif state == AgentState.FAIL:
-                print("❌ [FSM] Failed.")
-                def fail_gen():
-                    yield "Erro: Não foi possível obter as informações necessárias após várias tentativas."
-                return fail_gen(), context
-
+            current_state = next_state

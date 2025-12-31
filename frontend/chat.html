@@ -280,7 +280,13 @@
             if (metadata) {
                 const metaDiv = document.createElement('div');
                 metaDiv.className = 'message-metadata';
-                metaDiv.textContent = `Fontes: ${metadata.sources_used?.length || 0} | Confiança: ${metadata.confidence || 'N/A'}`;
+
+                let usageText = '';
+                if (metadata.usage) {
+                    usageText = ` | Tokens: ${metadata.usage.prompt_tokens} In / ${metadata.usage.completion_tokens} Out`;
+                }
+
+                metaDiv.textContent = `Fontes: ${metadata.sources_used?.length || 0} | Confiança: ${metadata.confidence || 'N/A'}${usageText}`;
                 contentDiv.appendChild(metaDiv);
             }
 
@@ -440,7 +446,13 @@
                 if (metadata) {
                     const metaDiv = document.createElement('div');
                     metaDiv.className = 'message-metadata';
-                    metaDiv.textContent = `Fontes: ${metadata.sources_used?.length || 0} | Confiança: ${metadata.confidence || 'N/A'}`;
+
+                    let usageText = '';
+                    if (metadata.usage) {
+                        usageText = ` | Tokens: ${metadata.usage.prompt_tokens} In / ${metadata.usage.completion_tokens} Out`;
+                    }
+
+                    metaDiv.textContent = `Fontes: ${metadata.sources_used?.length || 0} | Confiança: ${metadata.confidence || 'N/A'}${usageText}`;
                     contentDiv.appendChild(metaDiv);
                 }
 

@@ -169,6 +169,7 @@ async def stream_chat(request: ChatRequest):
                     "conversation_id": conversation_id,
                     "sources_used": context.get_memory("sources_used"),
                     "confidence": context.get_memory("confidence"),
+                    "usage": context.get_memory("total_usage"),
                     "context": context.model_dump(mode="json")
                 }
             })

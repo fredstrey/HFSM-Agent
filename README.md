@@ -11,11 +11,11 @@ Finance.AI is a sophisticated RAG (Retrieval-Augmented Generation) system specia
 - **Endpoint**: `/strem_fsm`
 - **Implementation**: `finitestatemachineAgent` package.
 
-### 2. Hierarchical FSM (HFSM) Agent [NEW] ⚡
+### 2. Hierarchical FSM (HSM) Agent [NEW] ⚡
 **Best for**: High-performance streaming and native API integration.
 - **Native Tool Calling**: Uses the LLM's native `tool_calls` API instead of text parsing.
-- **Streaming**: Supports real-time token streaming with intermediate tool execution events.
-- **Hierarchical**: Decomposed into sub-FSMs (`Router`, `Tool`, `Validation`, `Answer`).
+- **Streaming & Telemetry**: Real-time token usage tracking (`In/Out`) and streaming.
+- **Hierarchical**: Decomposed into superstates (`Reasoning`, `Execution`, `Recovery`, `Terminal`) and substates (`Router`, `Tool`, `Validation`, `Answer`).
 - **Endpoint**: `/stream` (Default for Frontend Demo)
 - **Implementation**: `finitestatemachineAgent/hfsm_agent.py`.
 
@@ -31,8 +31,8 @@ Finance.AI is a sophisticated RAG (Retrieval-Augmented Generation) system specia
 
 ## 🎯 Features
 
-- **Triple Architecture**: Choose between FSM, HFSM (Native Streaming), or ReAct.
-- **Native Streaming**: Real-time answer generation with `HFSM Agent`.
+- **Triple Architecture**: Choose between FSM, HSM, or ReAct.
+- **Telemetry**: Real-time token usage display in chat interface.
 - **RAG Integration**: Specialized implementations for all architectures.
 - **Financial Tools**: Semantic search, real-time stock prices (Yahoo Finance), and comparison.
 - **Local PDF Processing**: Endpoint to process PDFs locally using **Docling**.
@@ -40,40 +40,35 @@ Finance.AI is a sophisticated RAG (Retrieval-Augmented Generation) system specia
 
 ## 🏗️ Architectures Compared
 
-       ┌──────────────┐◄──────┐
-       │  Router FSM  │       │
-       └──────┬───────┘       │
-              │               │
-      ┌───────┴───────┐       │
-      │               │ (direct)
-      ▼               ▼       │
-┌──────────┐    ┌────────────┐│
-│ Tool FSM │───►│ Validation ││
-└──────────┘    │    FSM     ││
-                └─────┬──────┘│
-                      │ (retry)
-                      └───────┘
-                      │ (valid)
-                      ▼
-               ┌────────────┐
-               │ Answer FSM │ ⚡ (Stream)
-               └────────────┘
+### HSM Architecture (Hierarchical)
+```mermaid
+stateDiagram-v2
+    [*] --> ReasoningState
+    
+    state ReasoningState {
+        [*] --> RouterState
+        RouterState --> ExecutionState : Needs Info
+        RouterState --> TerminalState : Has Answer
+    }
 
-### FSM Architecture (Deterministic)
-   ┌──────────────┐
-   │ Router State │◄──────┐
-   └──────┬───────┘       │
-          │               │
-  (call)  ▼      (result) │
-   ┌────────────┐         │
-   │ Tool State │─────────┘
-   └────────────┘
-          │
-   (answer)
-          ▼
-   ┌───────────────┐
-   │ Synthesis FSM │
-   └───────────────┘
+    state ExecutionState {
+        [*] --> ToolState
+        ToolState --> ValidationState
+        ValidationState --> [*] : Valid
+        ValidationState --> RecoveryState : Invalid
+    }
+
+    state RecoveryState {
+        [*] --> RetryState
+        RetryState --> ReasoningState : Retry
+        RetryState --> TerminalState : Give Up
+    }
+
+    state TerminalState {
+        AnswerState --> [*]
+        FailState --> [*]
+    }
+```
 
 ### ReAct Architecture (LLM is Autonomous)
 ```
