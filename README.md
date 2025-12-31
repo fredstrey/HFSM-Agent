@@ -1,6 +1,16 @@
-# Finance.AI - Production-Grade HFSM Agent Framework
+# Finance.AI - HFSM Agent Mini-Framework
 
-Finance.AI is a sophisticated financial assistant powered by a **Hierarchical Finite State Machine (HFSM)** architecture. Built for production use with enterprise-grade features: context pruning, validation, retry logic, persistence, and comprehensive observability.
+Finance.AI is a sophisticated financial assistant powered by a **Hierarchical Finite State Machine (HFSM)** architecture. Built for research and learning purposes with basic features: context pruning, validation, retry logic, persistence, and comprehensive observability.
+
+## 📺 Demo
+
+![Finance.AI Demo](./financeai.mp4)
+
+### Screenshots
+
+![Screenshot 1](./image1.png)
+
+![Screenshot 2](./image2.png)
 
 ## 🏗️ Architecture Overview
 
@@ -92,7 +102,7 @@ The API will be available at `http://localhost:8000`
 
 ### 5. Try the Frontend
 
-Open `frontend/chat.html` in your browser for a beautiful chat interface with:
+Open `frontend/chat.html` in your browser for a basic chat interface with:
 - Real-time streaming responses
 - Token usage display (Input/Output)
 - Source tracking
@@ -104,51 +114,51 @@ Open `frontend/chat.html` in your browser for a beautiful chat interface with:
 
 ```
 Finance.AI/
-├── core/                          # Framework Core
-│   ├── context.py                 # Execution Context & Memory
-│   ├── registry.py                # Tool Registry
-│   ├── executor.py                # Tool Executor
-│   ├── decorators.py              # @tool decorator
-│   └── schemas.py                 # Data Models
+├── core/                                 # Framework Core
+│   ├── context.py                        # Execution Context & Memory
+│   ├── registry.py                       # Tool Registry
+│   ├── executor.py                       # Tool Executor
+│   ├── decorators.py                     # @tool decorator
+│   └── schemas.py                        # Data Models
 │
-├── finitestatemachineAgent/       # HFSM Engine
-│   └── hfsm_agent.py              # State Machine Implementation
+├── finitestatemachineAgent/              # HFSM Engine
+│   └── hfsm_agent.py                     # State Machine Implementation
 │
-├── agents/                        # Domain-Specific Agents
-│   └── rag_agent_hfsm.py          # Finance Agent (Production)
+├── agents/                               # Domain-Specific Agents
+│   └── rag_agent_hfsm.py                 # Finance Agent (runable)
 │
-├── tools/                         # Domain Tools
-│   ├── rag_tools.py               # Financial Tools (search, stocks)
-│   └── rag_schemas.py             # Tool Schemas
+├── tools/                                # Domain Tools
+│   ├── rag_tools.py                      # Financial and RAG Tools (search, stocks)
+│   └── rag_schemas.py                    # Tool Schemas
 │
-├── providers/                     # LLM Providers
-│   ├── llm_client.py              # Unified LLM Client
-│   ├── openrouter.py              # OpenRouter Provider
-│   └── openrouter_function_caller.py
+├── providers/                            # LLM Providers
+│   ├── llm_client.py                     # Unified LLM Client
+│   ├── openrouter.py                     # OpenRouter Provider
+│   └── openrouter_function_caller.py     # OpenRouter Function Caller
 │
-├── embedding_manager/             # RAG Components
-│   └── embedding_manager.py       # Qdrant Integration
+├── embedding_manager/                    # RAG Components
+│   └── embedding_manager.py              # Qdrant Integration
 │
-├── api/                           # FastAPI Server
-│   ├── api.py                     # Main API
-│   └── api_schemas.py             # Request/Response Models
+├── api/                                  # FastAPI Server
+│   ├── api.py                            # Main API
+│   └── api_schemas.py                    # Request/Response Models
 │
-├── frontend/                      # Web Interface
-│   └── chat.html                  # Chat UI
+├── frontend/                             # Web Interface
+│   └── chat.html                         # Chat UI
 │
-├── examples/                      # Learning Examples
-│   ├── README.md                  # Tutorial
-│   ├── customer_support_agent.py  # Complete Agent Example
-│   └── demo_custom_agent.py       # Custom States Example
+├── examples/                             # Learning Examples
+│   ├── README.md                         # Tutorial
+│   ├── customer_support_agent.py         # Complete Agent Example
+│   └── demo_custom_agent.py              # Custom States Example     
 │
-├── logs/                          # Execution Logs
-│   └── snapshots/                 # State Snapshots (JSON)
+├── logs/                                 # Execution Logs
+│   └── snapshots/                        # State Snapshots (JSON)
 │
-├── docs/                          # Technical Documentation
-│   ├── technical_report_fsm_agent.md
-│   └── technical_report_react_agent.md
+├── docs/                                 # Technical Documentation
+│   ├── technical_report_fsm_agent.md     # Technical Report (HFSM Agent)
+│   └── Mercados Financeiros.pdf          # Finance Book for RAG Agent
 │
-└── docker-compose.yml             # Container Orchestration
+└── docker-compose.yml                    # Container Orchestration
 ```
 
 ---
@@ -165,14 +175,14 @@ search_documents(query="What are the responsibilities of COPOM?")
 ```
 
 #### 2. `get_stock_price`
-Get real-time price for a **single** stock
+Get real-time price for a **single** stock using yfinance API
 ```python
 get_stock_price(ticker="AAPL", period="1mo")
 # Returns: Current price, change %, high/low, market cap
 ```
 
 #### 3. `compare_stocks`
-Compare performance of **multiple** stocks
+Compare performance of **multiple** stocks using yfinance API
 ```python
 compare_stocks(tickers=["NVDA", "TSLA", "MSFT"], period="1y")
 # Returns: Ranked performance, best/worst performers
@@ -250,7 +260,7 @@ The `examples/` directory contains complete, runnable examples:
 A complete agent implementation showing:
 - How to define domain-specific tools
 - How to wrap `AgentEngine` in a custom class
-- Production-ready pattern (like `rag_agent_hfsm.py`)
+- Runable example (like `rag_agent_hfsm.py`)
 
 ```bash
 python examples/customer_support_agent.py
@@ -310,11 +320,10 @@ RAGAgentFSMStreaming(
     model="xiaomi/mimo-v2-flash:free"  # Change model here
 )
 ```
+Embedding model via local Ollama: `qwen3-embedding:0.6b` as default.
 
 Supported models (via OpenRouter):
-- `xiaomi/mimo-v2-flash:free` (Default, fast)
-- `google/gemini-2.0-flash-exp:free`
-- `anthropic/claude-3.5-sonnet`
+- `xiaomi/mimo-v2-flash:free` (Default, fast and free)
 - Any OpenRouter-compatible model
 
 ### Context Pruning
@@ -429,9 +438,3 @@ cat .env
 ## 🤝 Contributing
 
 This is a learning/research project. Feel free to fork and experiment!
-
----
-
-## 📄 License
-
-MIT License - See LICENSE file for details.

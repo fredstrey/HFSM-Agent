@@ -13,7 +13,7 @@ class RAGAgentFSMStreaming:
     def __init__(
         self,
         embedding_manager,
-        model: str = "xiaomi/mimo-v2-flash:free"
+        model: str = "google/gemini-2.0-flash-exp:free"
     ):
         rag_tools.initialize_rag_tools(embedding_manager)
 

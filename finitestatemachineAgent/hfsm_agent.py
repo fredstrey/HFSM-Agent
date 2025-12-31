@@ -505,6 +505,43 @@ class AgentEngine:
         
         # Allow states to verify/find peers (basic service locator via root)
         self.root.find_state_by_type = self._find_state_provider
+        
+        # Track if resources have been cleaned up
+        self._closed = False
+    
+    def close(self):
+        """
+        Cleanup resources.
+        
+        Shuts down thread pool and releases other resources.
+        Safe to call multiple times.
+        """
+        if self._closed:
+            return
+        
+        try:
+            # Shutdown thread pool if executor has one
+            if hasattr(self.executor, 'pool') and self.executor.pool:
+                logger.info("Shutting down executor thread pool...")
+                self.executor.pool.shutdown(wait=False)
+            
+            self._closed = True
+            logger.info("AgentEngine resources cleaned up")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+    
+    def __del__(self):
+        """Destructor - cleanup on garbage collection."""
+        self.close()
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - cleanup resources."""
+        self.close()
+        return False  # Don't suppress exceptions
 
     def register_state(self, name: str, state_instance: HierarchicalState):
         """Dynamically register a state."""
