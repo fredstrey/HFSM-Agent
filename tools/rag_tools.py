@@ -302,21 +302,40 @@ def compare_stocks(tickers: list, period: str = "1mo") -> Dict[str, Any]:
 
 @tool(
     name="redirect",
-    description="Use quando a pergunta NÃO tem relação com finanças, economia, mercado financeiro, ações ou investimentos. Indica que o assunto está fora do escopo."
+    description="Use para: 1) Saudações (olá, oi, bom dia); 2) Perguntas sobre capacidades do agente; 3) Assuntos totalmente fora de finanças (futebol, receitas, etc)"
 )
-def redirect(reason: str = "fora do escopo") -> Dict[str, Any]:
+def redirect(reason: str = "saudação") -> Dict[str, Any]:
     """
-    Redirect questions outside the scope of finance/economy
+    Handle greetings, capability questions, and off-topic queries
     
     Args:
-        reason: Reason for redirection
+        reason: Context of the query (saudação, capacidades, fora_do_escopo, etc)
         
     Returns:
-        Dictionary indicating redirection
+        Dictionary with context for LLM to generate appropriate response
     """
     return {
         "success": True,
-        "redirected": True,
+        "type": "redirect",
         "reason": reason,
-        "message": "Pergunta fora do escopo de finanças e economia"
+        "context": """Você é o Finance.AI, um assistente financeiro especializado.
+
+**Suas capacidades:**
+- 📊 Cotações de ações em tempo real (get_stock_price)
+- 📈 Comparação de performance entre ações (compare_stocks)
+- 📚 Busca em documentos sobre conceitos econômicos (search_documents)
+
+**Instruções de resposta:**
+- Se for SAUDAÇÃO: Cumprimente de forma amigável e ofereça ajuda
+- Se for PERGUNTA SOBRE CAPACIDADES: Explique brevemente o que você pode fazer com exemplos
+- Se for FORA DO ESCOPO: Explique educadamente que você é especializado em finanças e sugira temas válidos
+
+**Limitações:**
+- Não dá recomendações de investimento
+- Não prevê preços futuros
+- Foco exclusivo em finanças e economia
+- Nunca responda perguntas fora do escopo de finanças e economia
+- Caso o usuário tente fazer perguntas fora do escopo, responda educadamente explicando que você é especializado em finanças, explique suas capacidades e sugira temas válidos
+
+Gere uma resposta apropriada baseada no contexto: {reason}"""
     }

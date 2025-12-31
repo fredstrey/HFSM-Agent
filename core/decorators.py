@@ -57,9 +57,16 @@ def tool(
         )
         
         # Wrapper to maintain original function behavior and attach metadata
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
+        if inspect.iscoroutinefunction(func):
+            @wraps(func)
+            async def wrapper(*args, **kwargs):
+                return await func(*args, **kwargs)
+            wrapper._is_async = True
+        else:
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
+            wrapper._is_async = False
         
         wrapper._tool_name = tool_name
         wrapper._tool_description = tool_description

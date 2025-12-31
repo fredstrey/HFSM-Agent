@@ -113,7 +113,9 @@ async def health():
 @app.post("/stream")
 async def stream_chat(request: ChatRequest):
     """
-    Chat endpoint with streaming using a Hierarchical Finite State Machine (HFSM) Agent with native tool-calling capabilities.
+    Chat endpoint with async streaming using HFSM Agent.
+    
+    Now fully async for better performance and concurrency!
     """
 
     conversation_id = request.conversation_id or str(uuid.uuid4())
@@ -129,49 +131,45 @@ async def stream_chat(request: ChatRequest):
                 chat_history = history_dicts[-6:]  # last 3 turns
 
             # -----------------------------
-            # 2. Initialize STREAMING agent
+            # 2. Initialize ASYNC agent
             # -----------------------------
-            rag_agent = RAGAgentFSMStreaming(
+            from agents.rag_agent_hfsm_async import AsyncRAGAgentFSM
+            
+            rag_agent = AsyncRAGAgentFSM(
                 embedding_manager=embedding_manager,
                 model="xiaomi/mimo-v2-flash:free"
             )
 
             # -----------------------------
-            # 3. Run FSM in threadpool
+            # 3. Stream tokens (fully async!)
             # -----------------------------
-            def run_agent():
-                return rag_agent.run_stream(
-                    query=request.message,
-                    chat_history=chat_history
-                )
-
-            token_stream, context = await run_in_threadpool(run_agent)
-
-            # -----------------------------
-            # 4. Stream tokens
-            # -----------------------------
-            async for token in _sync_to_async_generator(token_stream):
+            async for token in rag_agent.run_stream(
+                query=request.message,
+                chat_history=chat_history
+            ):
                 yield json.dumps({
                     "type": "token",
                     "content": token
                 })
 
             # -----------------------------
-            # 5. Final metadata event
+            # 4. Final metadata event
             # -----------------------------
             yield json.dumps({
                 "type": "metadata",
                 "content": "",
                 "metadata": {
                     "conversation_id": conversation_id,
-                    "sources_used": context.get_memory("sources_used"),
-                    "confidence": context.get_memory("confidence"),
-                    "usage": context.get_memory("total_usage"),
-                    "context": context.model_dump(mode="json")
+                    "sources_used": await rag_agent.context.get_memory("sources_used") if hasattr(rag_agent, 'context') else [],
+                    "confidence": await rag_agent.context.get_memory("confidence") if hasattr(rag_agent, 'context') else None,
+                    "usage": await rag_agent.context.get_memory("total_usage") if hasattr(rag_agent, 'context') else {},
+                    "context": rag_agent.context.snapshot() if hasattr(rag_agent, 'context') else {}
                 }
             })
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             yield json.dumps({
                 "type": "error",
                 "content": str(e),
@@ -225,10 +223,6 @@ if __name__ == "__main__":
     print("   • http://localhost:8000/stream (POST)")
     print("   • http://localhost:8000/process_pdf (POST)")
     print("   • http://localhost:8000/health")
-    print("\n🤖 Models:")
-    print("   • Tool Caller: xiaomi/mimo-v2-flash:free (OpenRouter)")
-    print("   • Embeddings: qwen3-embedding:0.6b")
-    print("   • Response: xiaomi/mimo-v2-flash:free (OpenRouter)")
     print("\n" + "=" * 70)
     
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -53,6 +53,39 @@ stateDiagram-v2
 - ✅ **Observability**: Comprehensive logging, metrics, and telemetry
 - ✅ **Streaming**: Real-time token streaming with usage tracking
 - ✅ **Extensible**: Easy to add custom states and tools
+- ⚡ **Async/Await**: Full async architecture for better performance
+
+### Async Architecture
+
+Finance.AI features a **complete async/await implementation** for superior performance and scalability:
+
+```python
+# Async HFSM Agent
+from agents.rag_agent_hfsm_async import AsyncRAGAgentFSM
+
+agent = AsyncRAGAgentFSM(embedding_manager)
+
+# Async streaming
+async for token in agent.run_stream("What is the Selic rate?"):
+    print(token, end="", flush=True)
+```
+
+**Performance Improvements:**
+- ⚡ **faster** response times
+- 📊 **better** concurrency
+- 💾 **less** memory per operation
+- 🚀 **Zero** threadpool overhead
+
+**Async Components:**
+- `AsyncAgentEngine` - Async state machine dispatch
+- `AsyncLLMClient` - Async OpenRouter provider (httpx)
+- `AsyncToolExecutor` - Concurrent tool execution (asyncio.gather)
+- `AsyncExecutionContext` - Thread-safe context (asyncio.Lock)
+
+**Backward Compatibility:**
+- Sync version still available (`RAGAgentFSMStreaming`)
+- Gradual migration path
+- Same API interface
 
 ---
 
@@ -115,32 +148,38 @@ Open `frontend/chat.html` in your browser for a basic chat interface with:
 ```
 Finance.AI/
 ├── core/                                 # Framework Core
-│   ├── context.py                        # Execution Context & Memory
+│   ├── context.py                        # Execution Context & Memory (Sync)
+│   ├── context_async.py                  # Async Execution Context
+│   ├── executor.py                       # Tool Executor (Sync)
+│   ├── executor_async.py                 # Async Tool Executor
 │   ├── registry.py                       # Tool Registry
-│   ├── executor.py                       # Tool Executor
 │   ├── decorators.py                     # @tool decorator
 │   └── schemas.py                        # Data Models
 │
 ├── finitestatemachineAgent/              # HFSM Engine
-│   └── hfsm_agent.py                     # State Machine Implementation
+│   ├── hfsm_agent.py                     # State Machine (Sync)
+│   └── hfsm_agent_async.py               # Async State Machine ⚡
 │
 ├── agents/                               # Domain-Specific Agents
-│   └── rag_agent_hfsm.py                 # Finance Agent (runable)
+│   ├── rag_agent_hfsm.py                 # Finance Agent (Sync)
+│   └── rag_agent_hfsm_async.py           # Async Finance Agent ⚡
 │
 ├── tools/                                # Domain Tools
 │   ├── rag_tools.py                      # Financial and RAG Tools (search, stocks)
 │   └── rag_schemas.py                    # Tool Schemas
 │
 ├── providers/                            # LLM Providers
-│   ├── llm_client.py                     # Unified LLM Client
-│   ├── openrouter.py                     # OpenRouter Provider
+│   ├── llm_client.py                     # Unified LLM Client (Sync)
+│   ├── llm_client_async.py               # Async LLM Client ⚡
+│   ├── openrouter.py                     # OpenRouter Provider (Sync)
+│   ├── openrouter_async.py               # Async OpenRouter (httpx) ⚡
 │   └── openrouter_function_caller.py     # OpenRouter Function Caller
 │
 ├── embedding_manager/                    # RAG Components
 │   └── embedding_manager.py              # Qdrant Integration
 │
 ├── api/                                  # FastAPI Server
-│   ├── api.py                            # Main API
+│   ├── api.py                            # Main API (Async) ⚡
 │   └── api_schemas.py                    # Request/Response Models
 │
 ├── frontend/                             # Web Interface
