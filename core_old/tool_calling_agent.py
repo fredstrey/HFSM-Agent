@@ -7,10 +7,10 @@ import threading
 from typing import List, Callable, Optional, Dict, Any, Tuple
 from pydantic import BaseModel
 
-from .registry import ToolRegistry
-from .context import ExecutionContext
-from .executor import ToolExecutor
-from .schemas import AgentResponse
+from core.registry import ToolRegistry
+from core.execution_context import ExecutionContext
+from core.executor import ToolExecutor
+from core.agent_response import AgentResponse
 from providers.openrouter import OpenRouterProvider
 from providers.openrouter_function_caller import OpenRouterFunctionCaller
 
@@ -124,7 +124,7 @@ class ToolCallingAgent:
         Returns:
             Tuple of (AgentResponse, ExecutionContext)
         """
-        print(f"\\n🤖 Agent processando: {query}")
+        print(f"\n🤖 Agent processando: {query}")
         print("=" * 70)
         
         # Create or update context
@@ -144,7 +144,7 @@ class ToolCallingAgent:
         
         for iteration in range(1, self.max_iterations + 1):
             context.current_iteration = iteration
-            print(f"\\n🔄 Iteração {iteration}/{self.max_iterations}")
+            print(f"\n🔄 Iteração {iteration}/{self.max_iterations}")
             
             # Call tool caller
             response = self.tool_caller.call_with_tools(
@@ -167,18 +167,18 @@ class ToolCallingAgent:
                     tool_messages.append({
                         "role": "system",
                         "content": (
-                            "ERRO CRÍTICO: Você NÃO chamou nenhuma tool.\\n\\n"
-                            "RESPONDA EXCLUSIVAMENTE com UMA chamada de tool.\\n"
-                            "NÃO escreva texto.\\n"
-                            "NÃO explique.\\n"
-                            "NÃO faça perguntas.\\n\\n"
-                            "Formato OBRIGATÓRIO:\\n"
-                            "{ \"name\": \"<tool_name>\", \"arguments\": { ... } }\\n\\n"
-                            "Tools permitidas:\\n"
-                            "- search_documents\\n"
-                            "- get_stock_price\\n"
-                            "- compare_stocks\\n"
-                            "- redirect\\n\\n"
+                            "ERRO CRÍTICO: Você NÃO chamou nenhuma tool.\n\n"
+                            "RESPONDA EXCLUSIVAMENTE com UMA chamada de tool.\n"
+                            "NÃO escreva texto.\n"
+                            "NÃO explique.\n"
+                            "NÃO faça perguntas.\n\n"
+                            "Formato OBRIGATÓRIO:\n"
+                            "{ \"name\": \"<tool_name>\", \"arguments\": { ... } }\n\n"
+                            "Tools permitidas:\n"
+                            "- search_documents\n"
+                            "- get_stock_price\n"
+                            "- compare_stocks\n"
+                            "- redirect\n\n"
                             f"Pergunta do usuário: {query}"
                         )
                     })
@@ -237,7 +237,7 @@ class ToolCallingAgent:
             context=context
         )
         
-        print(f"\\n✅ Resposta gerada!")
+        print(f"\n✅ Resposta gerada!")
         print(f"   Fontes: {len(sources_used)}")
         
         return response, context
@@ -441,7 +441,7 @@ Pergunta ATUAL do usuário:"""
         if not context:
             context_text = "Nenhum contexto disponível."
         else:
-            context_text = "\\n\\n".join(context)
+            context_text = "\n\n".join(context)
         
         prompt = f"""Com base no contexto abaixo, responda a pergunta do usuário.
 

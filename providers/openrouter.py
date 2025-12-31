@@ -5,7 +5,7 @@ Supports chat completion with streaming and reasoning tokens.
 """
 import os
 import requests
-from typing import List, Dict, Optional, Iterator
+from typing import List, Dict, Optional
 
 
 class OpenRouterProvider:
@@ -91,6 +91,8 @@ class OpenRouterProvider:
             json=payload,
             headers=headers
         )
+        if not response.ok:
+            print(f"OpenRouter Error: {response.text}")
         response.raise_for_status()
         
         data = response.json()

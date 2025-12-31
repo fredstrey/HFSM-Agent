@@ -4,8 +4,7 @@ RAG Tools V3 - Adapted for the Generic ReactAgent Framework
 from typing import Dict, Any, List
 import yfinance as yf
 
-# Using the new decorator from ReactAgent
-from ReactAgent.decorators import tool
+from core.decorators import tool
 from embedding_manager.embedding_manager import EmbeddingManager
 
 

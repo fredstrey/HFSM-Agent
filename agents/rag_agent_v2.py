@@ -9,11 +9,11 @@ from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from core import ToolCallingAgent, AgentResponse
-from core.execution_context import ExecutionContext
+from core import ExecutionContext
 import tools.rag_tools as rag_tools
-from agents.context_agent import ContextAgent
-from agents.validation_agent import ValidationAgent
-from agents.react_agent import ReActAgent, ReActDecision
+from .context_agent import ContextAgent
+from .validation_agent import ValidationAgent
+from .react_agent import ReActAgent, ReActDecision
 
 class RAGResponse(BaseModel):
     """Custom response model for RAG Agent"""

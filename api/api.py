@@ -11,6 +11,7 @@ import sys
 import os
 from typing import AsyncGenerator
 from dotenv import load_dotenv
+from api_utils import _sync_to_async_generator
 
 # Load environment variables
 load_dotenv()
@@ -20,6 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from api_schemas import ChatRequest, ChatResponse, ProcessPDFRequest, ProcessPDFResponse
 from embedding_manager.embedding_manager import EmbeddingManager
+from agents.rag_agent_hfsm import RAGAgentFSMStreaming
 from agents.rag_agent_v3 import RAGAgentV3
 from pdf_pipeline.pdf_processor import PDFProcessor
 
@@ -114,7 +116,78 @@ async def health():
 @app.post("/stream")
 async def stream_chat(request: ChatRequest):
     """
+    Chat endpoint with streaming using a Hierarchical Finite State Machine (HFSM) Agent with native tool-calling capabilities.
+    """
+
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+
+    async def generate_stream() -> AsyncGenerator[str, None]:
+        try:
+            # -----------------------------
+            # 1. Process chat history
+            # -----------------------------
+            chat_history = []
+            if request.chat_history:
+                history_dicts = [msg.model_dump() for msg in request.chat_history]
+                chat_history = history_dicts[-6:]  # last 3 turns
+
+            # -----------------------------
+            # 2. Initialize STREAMING agent
+            # -----------------------------
+            rag_agent = RAGAgentFSMStreaming(
+                embedding_manager=embedding_manager,
+                model="xiaomi/mimo-v2-flash:free"
+            )
+
+            # -----------------------------
+            # 3. Run FSM in threadpool
+            # -----------------------------
+            def run_agent():
+                return rag_agent.run_stream(
+                    query=request.message,
+                    chat_history=chat_history
+                )
+
+            token_stream, context = await run_in_threadpool(run_agent)
+
+            # -----------------------------
+            # 4. Stream tokens
+            # -----------------------------
+            async for token in _sync_to_async_generator(token_stream):
+                yield json.dumps({
+                    "type": "token",
+                    "content": token
+                })
+
+            # -----------------------------
+            # 5. Final metadata event
+            # -----------------------------
+            yield json.dumps({
+                "type": "metadata",
+                "content": "",
+                "metadata": {
+                    "conversation_id": conversation_id,
+                    "sources_used": context.get_memory("sources_used"),
+                    "confidence": context.get_memory("confidence"),
+                    "context": context.model_dump(mode="json")
+                }
+            })
+
+        except Exception as e:
+            yield json.dumps({
+                "type": "error",
+                "content": str(e),
+                "metadata": {}
+            })
+
+    return EventSourceResponse(generate_stream())
+
+@app.post("/strem_fsm")
+async def stream_fsm(request: ChatRequest):
+    """
     Endpoint chat with streaming via Server-Sent Events
+
+    This endpoint uses the Finite State Machine (FSM) agent with streaming.
     
     Args:
         request: ChatRequest with user message
@@ -140,10 +213,10 @@ async def stream_chat(request: ChatRequest):
                 print("📜 [DEBUG] Nenhum chat history recebido")
             
             # Create new instance of RAG Agent V2 with history
-            rag_agent = RAGAgentV3(
+            rag_agent = RAGAgentFSM(
                 embedding_manager=embedding_manager,
                 model="xiaomi/mimo-v2-flash:free",
-                max_iterations=request.max_iterations 
+                max_steps=10 
             )
             
             
@@ -176,6 +249,72 @@ async def stream_chat(request: ChatRequest):
             
         except Exception as e:
             # Error chunk
+            yield json.dumps({
+                "type": "error",
+                "content": str(e),
+                "metadata": {}
+            })
+    
+    return EventSourceResponse(generate_stream())
+
+@app.post("/stream_react")
+async def stream_react(request: ChatRequest):
+    """
+    Endpoint chat with ReAct Agent
+    
+    Args:
+        request: ChatRequest with user message
+        
+    Returns:
+        EventSourceResponse with streaming chunks
+    """
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+    
+    async def generate_stream() -> AsyncGenerator[str, None]:
+        """Generate streaming chunks"""
+        try:
+            # Process chat history
+            chat_history = []
+            if request.chat_history:
+                history_dicts = [msg.model_dump() for msg in request.chat_history]
+                chat_history = history_dicts[-6:]
+
+            # Create new instance of RAG Agent V3
+            rag_agent = RAGAgentV3(
+                embedding_manager=embedding_manager,
+                model="xiaomi/mimo-v2-flash:free",
+                max_iterations=5 
+            )
+            
+            # Execute ReAct Agent
+            def run_agent():
+                return rag_agent.run(
+                    query=request.message,
+                    chat_history=chat_history
+                )
+
+            # blocked run (ReAct is currently sync and non-streaming)
+            response, context = await run_in_threadpool(run_agent)
+            
+            # Response chunk
+            yield json.dumps({
+                "type": "system",
+                "content": response.answer
+            })
+            
+            # Final chunk
+            yield json.dumps({
+                "type": "metadata",
+                "content": "",
+                "metadata": {
+                    "conversation_id": conversation_id,
+                    "sources_used": response.sources_used,
+                    "confidence": response.confidence,
+                    "context": context.model_dump(mode='json')
+                }
+            })
+            
+        except Exception as e:
             yield json.dumps({
                 "type": "error",
                 "content": str(e),

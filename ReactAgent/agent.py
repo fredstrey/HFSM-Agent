@@ -4,10 +4,10 @@ from pydantic import BaseModel
 
 from providers.openrouter import OpenRouterProvider
 from providers.openrouter_function_caller import OpenRouterFunctionCaller
-from .registry import ToolRegistry
-from .executor import ToolExecutor
-from .context import ExecutionContext
-from .schemas import ReActDecision, ReActAnalysis, AgentResponse
+from core.registry import ToolRegistry
+from core.executor import ToolExecutor
+from core.context import ExecutionContext
+from core.schemas import ReActDecision, ReActAnalysis, AgentResponse
 
 class ReactAgent:
     """
@@ -122,7 +122,7 @@ class ReactAgent:
                 print(f"🤔 Decisão ReAct: {analysis.decision} | Razão: {analysis.reasoning}")
                 
                 if analysis.decision == "continue":
-                     # Information is sufficient (confusing name in V2, but means "proceed to answer")
+                     # Information is sufficient
                      print("✅ Informação suficiente. Gerando resposta final.")
                      # Synthesize final answer from ALL context
                      final_content = self._synthesize_final_answer(query, context)

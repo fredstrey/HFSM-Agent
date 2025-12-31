@@ -11,7 +11,7 @@ from tools import rag_tools
 from embedding_manager.embedding_manager import EmbeddingManager
 from core.registry import ToolRegistry
 from core.executor import ToolExecutor
-from core.execution_context import ExecutionContext
+from core import ExecutionContext
 
 
 class RAGAgent:

@@ -1,42 +1,96 @@
-# Finance.AI - RAG Agent with ReAct
+# Finance.AI - Dual Architecture Agent System
 
-RAG (Retrieval-Augmented Generation) system specialized in finance and economics, featuring a ReAct agent for iterative reasoning and action.
+Finance.AI is a sophisticated RAG (Retrieval-Augmented Generation) system specialized in finance and economics. It now features **two distinct agent architectures**, allowing you to choose between deterministic control and autonomous reasoning.
+
+## 🧠 Two Core Architectures
+
+### 1. Finite State Machine (FSM) Agent
+**Best for**: Production environments requiring strict control, predictability, and efficiency.
+- **Deterministic**: Follows a predefined state flow (Route → Call Tool → Answer).
+- **Prompt Engineering**: Uses text-based JSON structured prompts logic.
+- **Endpoint**: `/strem_fsm`
+- **Implementation**: `finitestatemachineAgent` package.
+
+### 2. Hierarchical FSM (HFSM) Agent [NEW] ⚡
+**Best for**: High-performance streaming and native API integration.
+- **Native Tool Calling**: Uses the LLM's native `tool_calls` API instead of text parsing.
+- **Streaming**: Supports real-time token streaming with intermediate tool execution events.
+- **Hierarchical**: Decomposed into sub-FSMs (`Router`, `Tool`, `Validation`, `Answer`).
+- **Endpoint**: `/stream` (Default for Frontend Demo)
+- **Implementation**: `finitestatemachineAgent/hfsm_agent.py`.
+
+### 3. ReAct Agent (Reasoning + Acting)
+**Best for**: Complex research, multi-step reasoning, and exploratory tasks.
+- **Autonomous**: The LLM decides the next step based on observations.
+- **Flexible**: Can refine queries, switch strategies, and self-correct dynamically.
+- **Deep Reasoning**: Performs an explicit analysis step after each action.
+- **Endpoint**: `/stream_react`
+- **Implementation**: `ReactAgent` package.
+
+---
 
 ## 🎯 Features
 
-- **ReactAgent Framework**: Generic, reusable agent framework with explicit reasoning
-- **RAG Agent V3**: Specialized implementation for finance using the new framework
-- **ReAct Loop**: Explicit "Observe-Reason-Act" loop with up to 3 iterations
-- **Smart Validation**: Analysis step after each tool call to verify if the query was fully answered
-- **Financial Tools**: Semantic search, real-time stock prices (Yahoo Finance), and comparison
-- **Local PDF Processing**: Endpoint to process PDFs locally using **Docling**, preserving layout and semantics
-- **Decoupled Architecture**: Clean separation between generic agent logic and domain-specific tools
+- **Triple Architecture**: Choose between FSM, HFSM (Native Streaming), or ReAct.
+- **Native Streaming**: Real-time answer generation with `HFSM Agent`.
+- **RAG Integration**: Specialized implementations for all architectures.
+- **Financial Tools**: Semantic search, real-time stock prices (Yahoo Finance), and comparison.
+- **Local PDF Processing**: Endpoint to process PDFs locally using **Docling**.
+- **Decoupled Architecture**: Clean separation between core logic (`core/`), specific agents (`agents/`), and tools (`tools/`).
 
-## 🏗️ Architecture
+## 🏗️ Architectures Compared
 
+       ┌──────────────┐◄──────┐
+       │  Router FSM  │       │
+       └──────┬───────┘       │
+              │               │
+      ┌───────┴───────┐       │
+      │               │ (direct)
+      ▼               ▼       │
+┌──────────┐    ┌────────────┐│
+│ Tool FSM │───►│ Validation ││
+└──────────┘    │    FSM     ││
+                └─────┬──────┘│
+                      │ (retry)
+                      └───────┘
+                      │ (valid)
+                      ▼
+               ┌────────────┐
+               │ Answer FSM │ ⚡ (Stream)
+               └────────────┘
+
+### FSM Architecture (Deterministic)
+   ┌──────────────┐
+   │ Router State │◄──────┐
+   └──────┬───────┘       │
+          │               │
+  (call)  ▼      (result) │
+   ┌────────────┐         │
+   │ Tool State │─────────┘
+   └────────────┘
+          │
+   (answer)
+          ▼
+   ┌───────────────┐
+   │ Synthesis FSM │
+   └───────────────┘
+
+### ReAct Architecture (LLM is Autonomous)
 ```
-┌─────────────────┐
-│   User Query    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────────────┐
-│     Generic ReactAgent Loop     │
-│  ┌──────────────────────────┐   │
-│  │ 1. Tool Selection (LLM)  │   │
-│  │ 2. Tool Execution        │   │
-│  │ 3. Explicit Reasoning    │←──┼── Uses _analyze_progress
-│  │    (Critic Step)         │   │   to decide next move:
-│  │                          │   │   - Continue (Finish)
-│  │                          │   │   - Retry (Refine Query)
-│  │                          │   │   - Switch Tool
-│  └──────────────────────────┘   │
-└────────┬────────────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Final Synthesis │ ← Combines all observations
-└─────────────────┘
+┌──────────────────────────────────────────────┐
+│          Step-by-Step Reasoning Loop         │
+│  ┌────────────────────────────────────────┐  │
+│  │ 1. 🤔 Thought (Analyze Context)        │  │
+│  │ 2. 🛠️ Action (Select Tool & Args)     │  │
+│  │ 3. 📉 Observation (Tool Output)        │  │
+│  └───────────────────┬────────────────────┘  │
+│                      │                       │
+│            ┌─────────┴──────────┐            │
+│            ▼                    ▼            │
+│      [Need Info?]         [Have Answer?]     │
+│            │                    │            │
+│      (Repeat Loop)        (Final Answer)     │
+└──────────────────────────────────────────────┘
 ```
 
 ## 🚀 Installation
@@ -74,23 +128,28 @@ docker run -p 6333:6333 qdrant/qdrant
 
 ```
 Finance.AI/
-├── ReactAgent/                # GENERIC FRAMEWORK
-│   ├── agent.py               # Core ReAct Logic
-│   ├── decorators.py          # @tool decorator
-│   ├── executor.py            # Tool Executor
+├── core/                      # SHARED COMPONENTS
+│   ├── context.py             # Execution Context
 │   ├── registry.py            # Tool Registry
-│   └── context.py             # Execution Context
-├── agents/
-│   ├── rag_agent_v3.py        # Finance Agent (implements ReactAgent)
+│   ├── executor.py            # Tool Executor
+│   └── schemas.py             # Data Schemas
+├── finitestatemachineAgent/   # FSM ARCHITECTURE
+│   ├── fsm_agent.py           # State Logic
+│   └── ...
+├── ReactAgent/                # REACT ARCHITECTURE
+│   ├── agent.py               # Autonomous Logic
+│   └── ...
+├── agents/                    # AGENT IMPLEMENTATIONS
+│   ├── rag_agent_fsm.py       # Finance Agent (FSM Version)
+│   ├── rag_agent_v3.py        # Finance Agent (ReAct Version)
 │   └── ...
 ├── tools/
 │   ├── rag_tools_v3.py        # Financial Tools (@tool decorated)
 │   └── ...
 ├── api/
-│   └── api.py                 # FastAPI (Async with run_in_threadpool)
+│   └── api.py                 # FastAPI Interface
 └── examples/
-    ├── rag_v3_demo.py         # Main Demo
-    └── ...
+    └── rag_example.py         # Main Demo
 ```
 
 ## 🛠️ Available Tools
@@ -123,15 +182,29 @@ Indicates that question is out of scope
 python api/api.py
 ```
 
-### Make request
-```bash
-curl -X POST http://localhost:8000/stream \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is the price of AAPL and who defines the Selic rate?"}'
-```
-**Or try the dubious vibecoded html frontend :D**
+### Make request (Choose your Architecture)
 
-![alt text](image.png)
+#### 1. HFSM Agent (Default - Native Streaming)
+```bash
+curl -X POST http://localhost:8000/stream ...
+```
+
+#### 2. FSM Agent (Legacy)
+```bash
+curl -X POST http://localhost:8000/strem_fsm ...
+```
+
+#### 3. ReAct Agent (Autonomous)
+```bash
+curl -X POST http://localhost:8000/stream_react ...
+```
+
+**Or try the dubious vibecoded html frontend :D**
+> ℹ️ **Note**: The frontend (`chat.html`) is configured to use the **`/stream` (HFSM Agent)** endpoint by default for the best streaming experience.
+
+![alt text](image 1.png)
+
+![alt text](image 2.png)
 
 ### Process PDF (Locally with Docling)
 ```bash
@@ -140,61 +213,32 @@ curl -X POST http://localhost:8000/process_pdf \
   -d '{"pdf_path": "C:/path/to/doc.pdf", "max_tokens": 500}'
 ```
 
-### Add documents
-```bash
-python examples/add_finance_docs.py
-```
-
-## 🧠 ReAct Agent
-
-The ReAct Agent implements a reasoning and action loop:
-
-### Possible Decisions
-- **CONTINUE**: Sufficient information
-- **RETRY_WITH_REFINEMENT**: Refine query and try again
-- **CALL_DIFFERENT_TOOL**: Call different tool
-- **INSUFFICIENT_DATA**: Insufficient data after 3 iterations
-
-### Execution Example
-```
-Query: "Price of AAPL and who defines Selic?"
-
-Iteration 1: get_stock_price("AAPL") → $273.76
-ReAct: Missing answer about Selic → CALL_DIFFERENT_TOOL
-
-Iteration 2: search_documents("Who defines Selic?") → COPOM
-ReAct: Both parts answered → CONTINUE
-
-Response: "AAPL: $273.76. COPOM defines the Selic rate."
-```
-
 ## ⚙️ Configuration
 
-### LLM Models
-Configured in `agents/rag_agent_v3.py`:
+### Switching Models
+Configured in `agents/rag_agent_fsm.py` or `rag_agent_v3.py`:
 ```python
+# FSM Agent
+RAGAgentFSM(
+    model="xiaomi/mimo-v2-flash:free",
+    max_steps=10
+)
+
+# ReAct Agent
 RAGAgentV3(
     model="xiaomi/mimo-v2-flash:free",
-    max_iterations=3  # ReAct iterations
-)
-```
-
-### Qdrant
-```python
-EmbeddingManager(
-    embedding_model="qwen3-embedding:0.6b",
-    qdrant_url="http://localhost:6333",
-    collection_name="rag_api"
+    max_iterations=3
 )
 ```
 
 ## 📊 Implemented Features
 
-✅ ReAct loop with 3 iterations  
-✅ Sequential tool execution (semaphore)  
+✅ **Dual Architecture Core** (FSM + ReAct)  
+✅ **Deterministic State Flow** (FSM)  
+✅ **Autonomous Reasoning Loop** (ReAct)  
+✅ Sequential tool execution  
 ✅ Multi-part query detection  
-✅ Automatic query refinement  
-✅ Context accumulation between iterations  
+✅ Context accumulation  
 ✅ Intelligent response synthesis  
 ✅ Domain validation (finance/economics)  
 
@@ -202,15 +246,8 @@ EmbeddingManager(
 
 ### Qdrant won't connect
 ```bash
-# Check if container is running
-docker ps
-
-# Start Qdrant
 docker run -p 6333:6333 qdrant/qdrant
 ```
 
 ### Invalid API Key
 Check `.env` file and configure `OPENROUTER_API_KEY`
-
-### Empty responses
-Run `python examples/add_finance_docs.py` to add documents

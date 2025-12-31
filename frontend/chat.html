@@ -247,6 +247,7 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>
         const API_URL = 'http://localhost:8000/stream';
         const chatMessages = document.getElementById('chatMessages');
@@ -268,7 +269,13 @@
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            contentDiv.textContent = content;
+
+            // Render Markdown for assistant, plain text for user
+            if (role === 'assistant') {
+                contentDiv.innerHTML = marked.parse(content);
+            } else {
+                contentDiv.textContent = content; // User input stays as text to prevent injection
+            }
 
             if (metadata) {
                 const metaDiv = document.createElement('div');
@@ -349,7 +356,7 @@
                     body: JSON.stringify({
                         message: message,
                         stream: true,
-                        chat_history: historyToSend.slice(0, -1) // Não inclui a mensagem atual
+                        chat_history: historyToSend.slice(0, -1)
                     })
                 });
 
@@ -358,6 +365,29 @@
                 let assistantMessage = '';
                 let metadata = null;
                 let buffer = '';
+
+                let messageDiv = null;
+                let contentDiv = null;
+
+                const initMessageBubble = () => {
+                    if (messageDiv) return;
+                    hideTypingIndicator();
+
+                    messageDiv = document.createElement('div');
+                    messageDiv.className = 'message assistant';
+
+                    const avatar = document.createElement('div');
+                    avatar.className = 'message-avatar';
+                    avatar.textContent = '🤖';
+
+                    contentDiv = document.createElement('div');
+                    contentDiv.className = 'message-content';
+                    contentDiv.innerHTML = '<span class="cursor">|</span>';
+
+                    messageDiv.appendChild(avatar);
+                    messageDiv.appendChild(contentDiv);
+                    chatMessages.appendChild(messageDiv);
+                };
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -368,29 +398,37 @@
 
                     // Processa linhas completas
                     const lines = buffer.split('\n');
-                    // Mantém última linha incompleta no buffer
                     buffer = lines.pop() || '';
 
                     for (const line of lines) {
                         let trimmed = line.trim();
                         if (!trimmed) continue;
 
-                        // Remove prefixo SSE "data: " se existir
+                        // Ignore SSE comments/pings
+                        if (trimmed.startsWith(':')) continue;
+
+                        // Remove prefixo SSE "data: "
                         if (trimmed.startsWith('data: ')) {
                             trimmed = trimmed.substring(6);
                         }
 
                         try {
                             const data = JSON.parse(trimmed);
-                            console.log('Chunk recebido:', data);
 
-                            if (data.type === 'system') {
-                                assistantMessage = data.content;
+                            if (data.type === 'token') {
+                                initMessageBubble();
+                                assistantMessage += data.content;
+                                // Atualiza UI em tempo real
+                                contentDiv.innerHTML = marked.parse(assistantMessage);
+                                chatMessages.scrollTop = chatMessages.scrollHeight;
+
                             } else if (data.type === 'metadata') {
                                 metadata = data.metadata;
                             } else if (data.type === 'error') {
+                                initMessageBubble();
                                 console.error('Erro do servidor:', data.content);
-                                assistantMessage = `❌ Erro: ${data.content}`;
+                                assistantMessage += `\n❌ Erro: ${data.content}`;
+                                contentDiv.innerHTML = marked.parse(assistantMessage);
                             }
                         } catch (e) {
                             console.error('Erro ao parsear linha:', trimmed, e);
@@ -398,51 +436,28 @@
                     }
                 }
 
-                // Processa buffer final se houver conteúdo restante
-                if (buffer.trim()) {
-                    console.log('Processando buffer final:', buffer);
-                    try {
-                        const data = JSON.parse(buffer.trim());
-                        console.log('Chunk final recebido:', data);
-
-                        if (data.type === 'system') {
-                            assistantMessage = data.content;
-                        } else if (data.type === 'metadata') {
-                            metadata = data.metadata;
-                        } else if (data.type === 'error') {
-                            console.error('Erro do servidor:', data.content);
-                            assistantMessage = `❌ Erro: ${data.content}`;
-                        }
-                    } catch (e) {
-                        console.error('Erro ao parsear buffer final:', buffer, e);
-                    }
+                // Finaliza mensagem
+                if (metadata) {
+                    const metaDiv = document.createElement('div');
+                    metaDiv.className = 'message-metadata';
+                    metaDiv.textContent = `Fontes: ${metadata.sources_used?.length || 0} | Confiança: ${metadata.confidence || 'N/A'}`;
+                    contentDiv.appendChild(metaDiv);
                 }
 
-                // Remove indicador de digitação
-                hideTypingIndicator();
+                console.log('Mensagem final:', assistantMessage);
 
-                console.log('Mensagem final do assistente:', assistantMessage);
-                console.log('Metadata:', metadata);
-
-                // Adiciona resposta do assistente
+                // Adiciona ao histórico
                 if (assistantMessage) {
-                    addMessage('assistant', assistantMessage, metadata);
-
-                    // Adiciona ao histórico
                     conversationHistory.push({
                         role: 'assistant',
                         content: assistantMessage
                     });
-
                     updateHistoryCount();
-                } else {
-                    console.error('Nenhuma mensagem recebida do assistente!');
-                    addMessage('assistant', '❌ Erro: Nenhuma resposta recebida do servidor.');
                 }
 
             } catch (error) {
                 hideTypingIndicator();
-                addMessage('assistant', '❌ Erro ao conectar com o servidor. Verifique se a API está rodando.');
+                addMessage('assistant', '❌ Erro ao conectar com o servidor.');
                 console.error('Erro:', error);
             }
 
