@@ -178,7 +178,7 @@ class RouterState(AsyncHierarchicalState):
         messages = [{"role": "system", "content": system_instruction}]
 
         # Add chat history
-        # 🔥 Optimization: Skip history if intent was analyzed (query is already enhanced)
+        # Skip history if intent was analyzed (query is already enhanced)
         # or if this is a fork (context pollution)
         intent_analyzed = await context.get_memory("intent_analyzed", False)
         is_root = context.parent is None
@@ -1466,6 +1466,10 @@ IMPORTANTE:
             
             # Call LLM for intent analysis
             response = await self.intent_analysis_llm.chat(messages)
+
+            # 🔥 usage tracking
+            if "usage" in response:
+                await context.accumulate_usage(response["usage"])
             
             # Extract JSON from response (handle markdown code blocks)
             content = response.get("content", "").strip()
