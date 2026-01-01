@@ -934,11 +934,46 @@ class AnswerState(TerminalState):
                         "tool_calls": [{
                             "id": tool_call_id,
                             "type": "function",
+                            "function": {
+                                "name": call["tool_name"],
+                                "arguments": json.dumps(call["arguments"])
+                            }
+                        }]
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": call["tool_name"],
+                        "content": str(call.get("result", ""))
+                    })
+
             messages.append({
                 "role": "system",
                 "content": "Based on the tool results, provide a best-effort answer. If the information is insufficient or invalid, explain clearly what is missing. Do NOT call more tools."
             })
 
+        # 🔥 Check if streaming is enabled (default: True)
+        enable_streaming = await context.get_memory("enable_streaming", True)
+        
+        # Build final answer
+        messages.append({"role": "user", "content": context.user_query})
+        
+        if enable_streaming:
+            # Stream response
+            logger.info("🌊 [Answer] Streaming initialized")
+            # 🛡️ Safety Check Before LLM Call (Streaming)
+            await context.increment_llm_call()
+            stream = self.llm.chat_stream(messages, context)
+            
+            # Store stream for consumption
+            await context.set_memory("answer_stream", stream)
+        else:
+            # Non-streaming response
+            logger.info("📝 [Answer] Generating complete response")
+            # 🛡️ Safety Check Before LLM Call (Non-Streaming)
+            await context.increment_llm_call()
+            # 🔥 Fix: chat() only takes messages, not context
+            response = await self.llm.chat(messages)
             
             # Manually track usage if available
             if "usage" in response:
