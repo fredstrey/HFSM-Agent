@@ -7,6 +7,7 @@ Async version of RAG Agent using HFSM architecture.
 
 import sys
 import os
+import logging
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -17,6 +18,11 @@ from core.context_async import AsyncExecutionContext, SafetyMonitor, SafetyLimit
 from core.registry import ToolRegistry
 import tools.rag_tools as rag_tools
 from typing import AsyncIterator
+# Import custom states
+from agents.rag_custom_states import IntentAnalysisState
+from finitestatemachineAgent.hfsm_agent_async import Transition
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncRAGAgentFSM:
@@ -60,9 +66,15 @@ class AsyncRAGAgentFSM:
         executor = AsyncToolExecutor(registry)
         llm = AsyncLLMClient(model=model)
         
+        # Get current date for temporal context
+        from datetime import datetime
+        current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         # System instruction
-        system_instruction = """
+        system_instruction = f"""
 Você é o Finance.AI, um assistente financeiro especialista.
+
+DATA/HORA ATUAL: {current_date}
 
 REGRAS CRITICAS:
 1. Para conceitos econômicos, definições e contexto (ex: Selic, Copom, Inflação, PIB), SEMPRE use 'search_documents'. NUNCA use 'redirect' para temas econômicos.
@@ -73,6 +85,11 @@ REGRA ANTI-REDUNDÂNCIA (CRÍTICO):
 4. ANTES de chamar qualquer ferramenta, VERIFIQUE se você já tem os dados necessários nas chamadas de ferramentas anteriores (tool calls).
 5. Se você já chamou uma ferramenta e recebeu os dados, NÃO chame a mesma ferramenta novamente com os mesmos parâmetros.
 6. Use os resultados das ferramentas já executadas para responder a pergunta. Só chame uma nova ferramenta se realmente precisar de informações adicionais diferentes.
+
+REGRA TEMPORAL (CRÍTICO):
+7. Use a DATA/HORA ATUAL fornecida acima para contexto temporal
+8. NÃO invente datas - use apenas informações dos dados retornados pelas ferramentas
+9. Quando mencionar períodos (1 mês, 6 meses, 1 ano), calcule a partir da data atual
 
 Para perguntas conceituais sobre finanças, economia ou mercado financeiro, priorize sempre o uso de 'search_documents'.
 Nunca responda diretamente sem utilizar as ferramentas de busca disponiveis.
@@ -155,6 +172,35 @@ Query: "Explique Selic, Copom e CDI"
             
             return default_prompt + enhancement
         
+        # Custom post-router hook to enforce tool usage
+        async def enforce_tool_usage(context, transition):
+            """
+            RAG-specific hook: Reject direct answers, force tool usage.
+            
+            This keeps the engine domain-agnostic while allowing
+            RAG agent to enforce its own rules.
+            """
+
+            
+            if transition.to == "AnswerState" and transition.reason == "Direct answer generation":
+                # LLM tried to answer directly without tools - unacceptable for RAG
+                retry_count = await context.get_memory("rag_tool_retry", 0)
+                
+                if retry_count < 2:
+                    await context.set_memory("rag_tool_retry", retry_count + 1)
+                    logger.info(f"🔄 [RAG] Forcing tool usage (attempt {retry_count + 1}/2)")
+                    
+                    # Override transition to retry
+                    return Transition(to="RetryState", reason="RAG agent requires tool usage")
+                else:
+                    logger.error("❌ [RAG] LLM refusing to use tools after retries")
+                    # Let it fail to RetryState
+                    return Transition(to="RetryState", reason="Tool usage required")
+            
+            # Reset retry count on successful tool usage
+            if transition.to == "ToolState":
+                await context.set_memory("rag_tool_retry", 0)
+        
         # Create async agent engine with custom validation and parallel execution
         self.agent = AsyncAgentEngine(
             llm=llm,
@@ -170,13 +216,19 @@ Query: "Explique Selic, Copom e CDI"
             planning_system_prompt=enhance_rag_planning_prompt,  # Incremental enhancement
             # merge_fn=None -> uses default append merge
             max_parallel_branches=3,    # 🔥 Limit width to 3 branches per fork
-            max_global_requests=max_global_requests  # Safety limit
+            max_global_requests=max_global_requests,  # Safety limit
+            # 🔥 Enable built-in intent analysis
+            enable_intent_analysis=True,
+            intent_analysis_llm=llm
         )
+        
+        logger.info("✅ [RAG] Built-in intent analysis enabled")
     
     async def run_stream(
         self,
         query: str,
-        chat_history=None
+        chat_history=None,
+        enable_streaming: bool = True  # 🔥 NEW: Control streaming
     ) -> AsyncIterator[str]:
         """
         Run agent with async streaming.
@@ -184,10 +236,17 @@ Query: "Explique Selic, Copom e CDI"
         Args:
             query: User query
             chat_history: Optional chat history
+            enable_streaming: If True, stream response. If False, generate complete response first.
             
         Yields:
             Response tokens as they arrive
         """
+        # 🔥 DEBUG: Entry point
+        logger.info("=" * 80)
+        logger.info("🚀 [RAG] run_stream() CALLED")
+        logger.info(f"📝 [RAG] Query: {query[:100]}...")
+        logger.info("=" * 80)
+        
         # Run agent and get context
         
         # Create context manually with Safety Monitor
@@ -196,9 +255,13 @@ Query: "Explique Selic, Copom e CDI"
         
         await context.set_memory("system_instruction", self.agent.system_instruction)
         await context.set_memory("chat_history", chat_history or [])
+        await context.set_memory("enable_streaming", enable_streaming)  # 🔥 Set streaming flag
         
         try:
-            # Run dispatch
+            # 🔥 IntentAnalysis is now the initial state in dispatch
+            # No need to call it manually here
+            
+            # Run dispatch (starts from IntentAnalysisState)
             await self.agent.dispatch(context)
             
             # Store context for later access
