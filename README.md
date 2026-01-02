@@ -97,6 +97,22 @@ stateDiagram-v2
 - 🎯 **Customizable Validation**: Agent-specific validation logic
 - 🚫 **Anti-Redundancy**: Prevents duplicate tool calls
 
+### Async Context Pruning ✂️
+
+To handle limited context windows (especially with smaller models or long conversations), the `enable_context_pruning` feature maintains a sliding window of tool outputs:
+- Keeps the **full content** of the most recent N tool calls (configurable, default: 4).
+- **Truncates** older tool outputs to a summary length (configurable, default: 200 chars).
+- Preserves the semantic meaning of recent actions while saving tokens.
+
+```python
+agent = Agent(
+    model="xiaomi/mimo-v2-flash:free",
+    enable_context_pruning=True,     # Enable pruning
+    pruner_keep_recent=4,            # Keep last 4 calls full
+    pruner_max_length=200            # Truncate older calls to 200 chars
+)
+```
+
 ### Concurrency Safety & Validation
 
 Finance.AI implements **concurrency safety** features:

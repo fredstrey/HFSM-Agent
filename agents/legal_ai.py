@@ -38,16 +38,18 @@ class LegalAI:
         llm_provider: str = "openrouter",
         model: str = "xiaomi/mimo-v2-flash:free",
         api_key: str = None,
-        embedding_manager = None
+        embedding_manager = None,
+        **kwargs
     ):
         """
         Initialize Legal.AI agent.
         
         Args:
-            llm_provider: LLM provider (default: openrouter)
-            model: Model to use
-            api_key: API key (defaults to OPENROUTER_API_KEY env var)
-            embedding_manager: Optional EmbeddingManager instance
+            llm_provider: Provider name
+            model: Model name
+            api_key: API Key
+            embedding_manager: Embedding manager instance
+            **kwargs: Additional args passed to Agent (e.g., enable_context_pruning)
         """
         # Initialize tools if manager is provided
         if embedding_manager:
@@ -124,6 +126,15 @@ DIRETRIZES DE RESPOSTA RÁPIDA:
             
             # Features
 
+            # enable snapshots to save JSON state
+            enable_snapshots=kwargs.get("enable_snapshots", False),
+
+            # enable logging
+            enable_logging=kwargs.get("enable_logging", False),
+
+            # max retries for validation failure
+            max_retries=3,
+
             # enable forks for parallel research
             enable_parallel_planning=False,
 
@@ -155,10 +166,11 @@ DIRETRIZES DE RESPOSTA RÁPIDA:
 
             contract_strategy="epistemic",   # contract strategy for forks (simple, epistemic, your-custom-strategy)
             synthesis_strategy="llm", # synthesis strategy for forks (llm, concat, your-custom-strategy)
-
+            
+            enable_context_pruning=True # enable context pruning
         )
 
-        # Hot-swap contract strategy for LegalAI specialization
+        # contract strategy for LegalAI specialization
         self.agent.engine.contract_strategy = LegalEpistemicContractStrategy(self.agent.llm)
     
     async def run(self, query: str, chat_history: list = None):

@@ -219,7 +219,9 @@ async def stream_chat_legalai(request: ChatRequest):
             legal_ai = LegalAI(
                 llm_provider="openrouter",
                 model="xiaomi/mimo-v2-flash:free",
-                embedding_manager=embedding_manager
+                embedding_manager=embedding_manager,
+                enable_snapshots=request.enable_snapshots,  # Pass frontend toggle
+                enable_logging=request.enable_logging  # Enable logging
             )
 
             # -----------------------------

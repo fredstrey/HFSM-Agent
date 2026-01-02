@@ -21,6 +21,7 @@ from core.executor_async import AsyncToolExecutor
 from finitestatemachineAgent.transition import Transition
 from finitestatemachineAgent.fork_states import ResearchForkState, ForkSummaryState, ForkContractState
 from finitestatemachineAgent.fork_contracts import ForkResult, MergedContract, UncertainTopic
+from finitestatemachineAgent.context_pruning import AsyncContextPruner
 
 # Setup logging
 logger = logging.getLogger("AsyncAgentEngine")
@@ -39,6 +40,11 @@ if not logger.handlers:
     fh = logging.FileHandler("logs/agent.log", encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
+
+class DummyLogger:
+    """No-op logger for disabled logging."""
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
 
 # =================================================================================================
 # Domain Models for Parallel Execution
@@ -65,10 +71,11 @@ class AsyncHierarchicalState(ABC):
     Base class for async states in the Hierarchical FSM.
     Enforces immutability via __slots__ to prevent accidental mutable state.
     """
-    __slots__ = ("parent",)
+    __slots__ = ("parent", "logger")
     
-    def __init__(self, parent: Optional[AsyncHierarchicalState] = None):
+    def __init__(self, parent: Optional[AsyncHierarchicalState] = None, logger=None):
         self.parent = parent
+        self.logger = logger or logging.getLogger(__name__)
 
     @abstractmethod
     async def handle(self, context: AsyncExecutionContext) -> Optional['Transition | AsyncHierarchicalState']:
@@ -89,6 +96,57 @@ class AsyncHierarchicalState(ABC):
         """Hook called when exiting state."""
         pass
 
+
+class AsyncContextPolicyState(AsyncHierarchicalState):
+    """
+    Middleware state that enforces context policies (pruning) before delegation.
+    
+    This state sits between root and reasoning layers, applying pruning
+    whenever the state machine enters this layer.
+    """
+    __slots__ = ("pruner",)
+    
+    def __init__(
+        self, 
+        parent: Optional[AsyncHierarchicalState] = None,
+        pruner: Optional[AsyncContextPruner] = None,
+        logger=None
+    ):
+        """
+        Initialize context policy state.
+        
+        Args:
+            parent: Parent state in hierarchy
+            pruner: Context pruner instance (creates default if None)
+            logger: Custom logger
+        """
+        super().__init__(parent, logger=logger)
+        self.pruner = pruner or AsyncContextPruner()
+    
+    async def on_enter(self, context: AsyncExecutionContext):
+        """
+        Apply pruning when entering this state layer.
+        
+        Args:
+            context: Execution context
+        """
+        await self.pruner.prune(context)
+        active_calls = await context.get_memory("active_tool_calls", [])
+        if active_calls:
+            self.logger.info(f"✂️ [Policy] Pruned context applied. Active tool calls: {len(active_calls)}")
+    
+    async def handle(self, context: AsyncExecutionContext):
+        """
+        Delegate to child states (no specific handling).
+        
+        Args:
+            context: Execution context
+            
+        Returns:
+            None (delegates to children)
+        """
+        return None  # Delegate to active child
+
     def find_state_by_type(self, type_name: str) -> AsyncHierarchicalState:
         """Traverse hierarchy to find state."""
         if self.parent:
@@ -102,8 +160,8 @@ class AsyncHierarchicalState(ABC):
 
 class AgentRootState(AsyncHierarchicalState):
     """Root of the state hierarchy."""
-    def __init__(self):
-        super().__init__(parent=None)
+    def __init__(self, logger=None):
+        super().__init__(parent=None, logger=logger)
         self.find_state_by_type = None  # Will be set by engine
 
     async def handle(self, context: AsyncExecutionContext):
@@ -158,7 +216,7 @@ class RouterState(AsyncHierarchicalState):
         self.post_hook = post_hook  # 🔥 Domain-specific hook
 
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🧠 [Router] Thinking...")
+        self.logger.info("🧠 [Router] Thinking...")
         
         # Research context is injected ONLY in AnswerState for better control
         # - Check for parallel planning BEFORE calling LLM
@@ -186,10 +244,10 @@ class RouterState(AsyncHierarchicalState):
         
         history = await context.get_memory("chat_history", [])
         if history and should_include_history:
-            logger.info(f"📜 [Router] Including {len(history)} history messages")
+            self.logger.info(f"📜 [Router] Including {len(history)} history messages")
             messages.extend(history)
         elif history:
-            logger.info("🧹 [Router] Skipping history (Intent analyzed or Fork)")
+            self.logger.info("🧹 [Router] Skipping history (Intent analyzed or Fork)")
 
         messages.append({"role": "user", "content": context.user_query})
         
@@ -230,7 +288,7 @@ class RouterState(AsyncHierarchicalState):
             tool_choice=self.tool_choice  # Use configured value
         )
 
-        logger.info(f"📊 [Router] Token usage: {response.get('usage', {})}")
+        self.logger.info(f"📊 [Router] Token usage: {response.get('usage', {})}")
         
         # Track token usage in context
         usage = response.get('usage', {})
@@ -239,11 +297,11 @@ class RouterState(AsyncHierarchicalState):
         
         # Debug: Log what the LLM returned
         if response.get("content"):
-            logger.debug(f"🔍 [Router] LLM also returned content: {response['content'][:100]}...")
+            self.logger.debug(f"🔍 [Router] LLM also returned content: {response['content'][:100]}...")
 
         # Check for tool calls
         if response.get("tool_calls"):
-            logger.info(f"🔧 [Router] {len(response['tool_calls'])} tool(s) selected")
+            self.logger.info(f"🔧 [Router] {len(response['tool_calls'])} tool(s) selected")
 
             # Store tool calls (async)
             for call in response["tool_calls"]:
@@ -256,7 +314,7 @@ class RouterState(AsyncHierarchicalState):
             # Proceed to tool execution
             transition = Transition(to="ToolState", reason="Tools selected by LLM", metadata={"tool_count": len(response["tool_calls"])})
         else:
-            logger.warning("[Router] No tool calls generated by LLM.")
+            self.logger.warning("[Router] No tool calls generated by LLM.")
             transition = Transition(to="AnswerState", reason="Direct answer generation")
         
         # 🔥 Apply post-hook if provided (domain-specific logic)
@@ -279,13 +337,13 @@ class ToolState(AsyncHierarchicalState):
         self.skip_validation = skip_validation
 
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🛠️ [Tool] Executing tools...")
+        self.logger.info("🛠️ [Tool] Executing tools...")
 
         # Get pending tool calls
         pending = [c for c in context.tool_calls if c.get("result") is None]
 
         if not pending:
-            logger.warning("⚠️ [Tool] No pending tool calls")
+            self.logger.warning("⚠️ [Tool] No pending tool calls")
             return Transition(to="AnswerState", reason="No pending tool calls")
 
         # Execute all tools concurrently (async)
@@ -295,23 +353,23 @@ class ToolState(AsyncHierarchicalState):
         await context.update_tool_results(pending, results)
         
         for call in pending:
-            logger.info(f"✅ [Tool] Result for {call['tool_name']}: {str(call['result'])[:100]}...")
+            self.logger.info(f"✅ [Tool] Result for {call['tool_name']}: {str(call['result'])[:100]}...")
 
         # Decide next state based on validation config
         if self.skip_validation:
-            logger.info("⏩ [Tool] Skipping validation (configured)")
+            self.logger.info("⏩ [Tool] Skipping validation (configured)")
             
             # 🔥 CRITICAL: Check if we're in a fork context
             branch_id = await context.get_memory("branch_id")
             if branch_id:
                 # We're in a fork - go to ForkContractState
-                logger.info(f"🌿 [Tool] Fork context detected (branch: {branch_id}), proceeding to contract extraction")
+                self.logger.info(f"🌿 [Tool] Fork context detected (branch: {branch_id}), proceeding to contract extraction")
                 return Transition(to="ForkContractState", reason="Fork execution complete")
             else:
                 # Normal flow - go to AnswerState
                 return Transition(to="AnswerState", reason="Tools executed, validation skipped")
         else:
-            logger.info("🔍 [Tool] Proceeding to validation")
+            self.logger.info("🔍 [Tool] Proceeding to validation")
             return Transition(to="ValidationState", reason="Validation required")
 
 
@@ -329,7 +387,7 @@ class ValidationState(AsyncHierarchicalState):
         # Use custom validation function if provided
         if self.validation_fn:
             is_valid = await self.validation_fn(context, tool_name, result)
-            logger.info(f"✅ [Validation] Custom validation result: {is_valid}")
+            self.logger.info(f"✅ [Validation] Custom validation result: {is_valid}")
         else:
             # Default: simple LLM-based validation
             messages = [
@@ -343,17 +401,17 @@ class ValidationState(AsyncHierarchicalState):
 
             response = await self.llm.chat(messages)
             is_valid = "true" in response["content"].lower()
-            logger.info(f"✅ [Validation] Default validation result: {is_valid}")
+            self.logger.info(f"✅ [Validation] Default validation result: {is_valid}")
         
         return is_valid
 
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🔍 [Validation] Checking data...")
+        self.logger.info("🔍 [Validation] Checking data...")
 
         # Get last tool call atomically (thread-safe)
         async with context._lock:
             if not context.tool_calls:
-                logger.warning("⚠️ [Validation] No tool calls to validate")
+                self.logger.warning("⚠️ [Validation] No tool calls to validate")
                 return Transition(to="AnswerState", reason="No tools to validate")
             
             last_call = context.tool_calls[-1]
@@ -364,19 +422,19 @@ class ValidationState(AsyncHierarchicalState):
         is_valid = await self._validate(context, tool_name, result)
         
         if is_valid:
-            logger.info("✅ [Validation] Data is valid")
+            self.logger.info("✅ [Validation] Data is valid")
             
             # 🔥 CRITICAL: Check if we're in a fork context
             branch_id = await context.get_memory("branch_id")
             if branch_id:
                 # We're in a fork - go to ForkContractState
-                logger.info(f"🌿 [Validation] Fork context detected (branch: {branch_id}), proceeding to contract extraction")
+                self.logger.info(f"🌿 [Validation] Fork context detected (branch: {branch_id}), proceeding to contract extraction")
                 return Transition(to="ForkContractState", reason="Validation passed in fork")
             else:
                 # Normal flow - go to AnswerState
                 return Transition(to="AnswerState", reason="Validation passed")
         else:
-            logger.warning("⚠️ [Validation] Data is invalid")
+            self.logger.warning("⚠️ [Validation] Data is invalid")
             return Transition(to="RetryState", reason="Validation failed", metadata={"tool": tool_name})
 
 
@@ -480,24 +538,24 @@ Respond with valid JSON only."""
                 return ParallelPlan(strategy="single")
         
         except Exception as e:
-            logger.error(f"❌ [ParallelPlan] Planning failed: {e}")
+            self.logger.error(f"❌ [ParallelPlan] Planning failed: {e}")
             return ParallelPlan(strategy="single")  # Safe fallback
     
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🧩 [ParallelPlan] Evaluating parallelization strategy...")
+        self.logger.info("🧩 [ParallelPlan] Evaluating parallelization strategy...")
         
         # Use custom planner if provided
         if self.planner_fn:
             plan = await self.planner_fn(context)
-            logger.info(f"✅ [ParallelPlan] Custom planner result: {plan.strategy}")
+            self.logger.info(f"✅ [ParallelPlan] Custom planner result: {plan.strategy}")
         else:
             # Default: LLM-based planning
             plan = await self._default_llm_plan(context)
-            logger.info(f"✅ [ParallelPlan] LLM planner result: {plan.strategy}")
+            self.logger.info(f"✅ [ParallelPlan] LLM planner result: {plan.strategy}")
         
         # Validate plan
         if not isinstance(plan, ParallelPlan):
-            logger.warning("⚠️ [ParallelPlan] Invalid plan type, falling back to single")
+            self.logger.warning("⚠️ [ParallelPlan] Invalid plan type, falling back to single")
             return Transition(to="RouterState", reason="Invalid plan type", metadata={"fallback": True})
         
         # Store plan in context
@@ -506,10 +564,10 @@ Respond with valid JSON only."""
         
         # Decide next state based on strategy
         if plan.strategy == "parallel_research" and plan.branches:
-            logger.info(f"🔀 [ParallelPlan] Parallel execution with {len(plan.branches)} branches")
+            self.logger.info(f"🔀 [ParallelPlan] Parallel execution with {len(plan.branches)} branches")
             return Transition(to="ForkDispatchState", reason="Parallel execution strategy selected", metadata={"branches": len(plan.branches)})
         else:
-            logger.info("➡️ [ParallelPlan] Single path execution")
+            self.logger.info("➡️ [ParallelPlan] Single path execution")
             # Mark as checked ensures Router continues
             return Transition(to="RouterState", reason="Single path strategy selected")
 
@@ -524,12 +582,12 @@ class ForkDispatchState(AsyncHierarchicalState):
         self.engine = engine  # Reference to engine for dispatch
     
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🔀 [ForkDispatch] Starting parallel execution...")
+        self.logger.info("🔀 [ForkDispatch] Starting parallel execution...")
         
         # Get plan from context
         plan_data = await context.get_memory("parallel_plan")
         if not plan_data:
-            logger.warning("⚠️ [ForkDispatch] No valid plan, falling back")
+            self.logger.warning("⚠️ [ForkDispatch] No valid plan, falling back")
             return Transition(to="RouterState", reason="Missing parallel plan")
         
         # Handle both dict (serialized) and object (in-memory) cases
@@ -537,19 +595,19 @@ class ForkDispatchState(AsyncHierarchicalState):
             try:
                 plan = ParallelPlan(**plan_data)
             except Exception as e:
-                logger.error(f"❌ [ForkDispatch] Invalid plan data: {e}")
+                self.logger.error(f"❌ [ForkDispatch] Invalid plan data: {e}")
                 return Transition(to="RouterState", reason="Invalid plan data")
         elif isinstance(plan_data, ParallelPlan):
             plan = plan_data
         else:
-            logger.error(f"❌ [ForkDispatch] Unknown plan type: {type(plan_data)}")
+            self.logger.error(f"❌ [ForkDispatch] Unknown plan type: {type(plan_data)}")
             return Transition(to="RouterState", reason="Unknown plan type")
             
         if not plan.branches:
-            logger.warning("⚠️ [ForkDispatch] No branches in plan, falling back")
+            self.logger.warning("⚠️ [ForkDispatch] No branches in plan, falling back")
             return Transition(to="RouterState", reason="Empty branches in plan")
         
-        logger.info(f"🔀 [ForkDispatch] Spawning {len(plan.branches)} branches")
+        self.logger.info(f"🔀 [ForkDispatch] Spawning {len(plan.branches)} branches")
         
         # Create forked contexts
         fork_contexts = []
@@ -567,11 +625,11 @@ class ForkDispatchState(AsyncHierarchicalState):
             fork_ctx.user_query = f"{context.user_query}\n\nBranch goal: {branch.goal}"
             
             # - Detailed logging for observability
-            logger.info(f"🌿 [ForkDispatch] Creating fork '{branch.id}':")
-            logger.info(f"   📋 Task: {branch.goal}")
-            logger.info(f"   📝 Query: {fork_ctx.user_query[:200]}..." if len(fork_ctx.user_query) > 200 else f"   📝 Query: {fork_ctx.user_query}")
+            self.logger.info(f"🌿 [ForkDispatch] Creating fork '{branch.id}':")
+            self.logger.info(f"   📋 Task: {branch.goal}")
+            self.logger.info(f"   📝 Query: {fork_ctx.user_query[:200]}..." if len(fork_ctx.user_query) > 200 else f"   📝 Query: {fork_ctx.user_query}")
             if branch.constraints:
-                logger.info(f"   ⚠️  Constraints: {', '.join(branch.constraints)}")
+                self.logger.info(f"   ⚠️  Constraints: {', '.join(branch.constraints)}")
             
             fork_contexts.append((branch.id, fork_ctx))
         
@@ -586,10 +644,10 @@ class ForkDispatchState(AsyncHierarchicalState):
             successful_forks = []
             for (branch_id, fork_ctx), result in zip(fork_contexts, results):
                 if isinstance(result, Exception):
-                    logger.error(f"❌ [ForkDispatch] Branch {branch_id} failed: {result}")
+                    self.logger.error(f"❌ [ForkDispatch] Branch {branch_id} failed: {result}")
                 else:
                     successful_forks.append(fork_ctx)
-                    logger.info(f"✅ [ForkDispatch] Branch {branch_id} completed")
+                    self.logger.info(f"✅ [ForkDispatch] Branch {branch_id} completed")
             
             # - Accumulate token usage AND sources from all forks back to parent
             total_fork_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -633,12 +691,12 @@ class ForkDispatchState(AsyncHierarchicalState):
                     current_sources.append(source)
             await context.set_memory("sources_used", current_sources)
             
-            logger.info(f"📊 [ForkDispatch] Aggregated tokens: {total_fork_tokens['total_tokens']}")
-            logger.info(f"📚 [ForkDispatch] Aggregated sources: {len(all_fork_sources)}")
+            self.logger.info(f"📊 [ForkDispatch] Aggregated tokens: {total_fork_tokens['total_tokens']}")
+            self.logger.info(f"📚 [ForkDispatch] Aggregated sources: {len(all_fork_sources)}")
             
             if total_fork_tokens["total_tokens"] > 0:
                 await context.accumulate_usage(total_fork_tokens)
-                logger.info(f"📊 [ForkDispatch] Accumulated {total_fork_tokens['total_tokens']} tokens from {len(successful_forks)} fork(s)")
+                self.logger.info(f"📊 [ForkDispatch] Accumulated {total_fork_tokens['total_tokens']} tokens from {len(successful_forks)} fork(s)")
             
             # Store results
             await context.set_memory("fork_results", successful_forks)
@@ -646,23 +704,23 @@ class ForkDispatchState(AsyncHierarchicalState):
             if successful_forks:
                 return Transition(to="MergeState", reason="Forks completed", metadata={"successful_forks": len(successful_forks)})
             else:
-                logger.warning("⚠️ [ForkDispatch] All forks failed, falling back")
+                self.logger.warning("⚠️ [ForkDispatch] All forks failed, falling back")
                 return Transition(to="RouterState", reason="All forks failed")
         
         except Exception as e:
-            logger.error(f"❌ [ForkDispatch] Parallel execution failed: {e}")
+            self.logger.error(f"❌ [ForkDispatch] Parallel execution failed: {e}")
             return Transition(to="RouterState", reason="Parallel execution exception", metadata={"error": str(e)})
     
     async def _execute_fork(self, branch_id: str, fork_ctx: AsyncExecutionContext):
         """Execute a single fork through the engine."""
-        logger.info(f"🌿 [Fork:{branch_id}] Starting execution")
+        self.logger.info(f"🌿 [Fork:{branch_id}] Starting execution")
         
         # - Start from ResearchForkState (not RouterState)
         # This bypasses the full Router logic for efficiency
         # Pass explicitly to dispatch
         await self.engine.dispatch(fork_ctx, initial_state_name="ResearchForkState")
         
-        logger.info(f"🌿 [Fork:{branch_id}] Execution complete")
+        self.logger.info(f"🌿 [Fork:{branch_id}] Execution complete")
         return fork_ctx
 
 
@@ -676,16 +734,16 @@ class MergeState(AsyncHierarchicalState):
         self.merge_fn = merge_fn  # Custom merge function
     
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🧬 [Merge] Consolidating fork results...")
+        self.logger.info("🧬 [Merge] Consolidating fork results...")
         
         # Get fork results
         fork_results = await context.get_memory("fork_results", [])
         
         if not fork_results:
-            logger.warning("⚠️ [Merge] No fork results to merge")
+            self.logger.warning("⚠️ [Merge] No fork results to merge")
             return Transition(to="RouterState", reason="No results to merge")
         
-        logger.info(f"🧬 [Merge] Merging {len(fork_results)} fork results")
+        self.logger.info(f"🧬 [Merge] Merging {len(fork_results)} fork results")
         
         # Use custom merge function if provided
         if self.merge_fn:
@@ -698,14 +756,14 @@ class MergeState(AsyncHierarchicalState):
                     plan = plan_data
                     
                 merged = await self.merge_fn(context, fork_results, plan)
-                logger.info("✅ [Merge] Custom merge completed")
+                self.logger.info("✅ [Merge] Custom merge completed")
             except Exception as e:
-                logger.error(f"❌ [Merge] Custom merge failed: {e}, using default")
+                self.logger.error(f"❌ [Merge] Custom merge failed: {e}, using default")
                 merged = self._contract_merge(fork_results)
         else:
             # - Use deterministic contract merge by default
             merged = self._contract_merge(fork_results)
-            logger.info("✅ [Merge] Contract merge completed")
+            self.logger.info("✅ [Merge] Contract merge completed")
         
         # Store merged results as research_context (used by SynthesisState or AnswerState)
         await context.set_memory("research_context", merged)
@@ -716,11 +774,11 @@ class MergeState(AsyncHierarchicalState):
         
         if fork_results and len(fork_results) > 0:
             # We have fork results - go to synthesis
-            logger.info(f"🧬 [Merge] Routing to synthesis ({len(fork_results)} forks)")
+            self.logger.info(f"🧬 [Merge] Routing to synthesis ({len(fork_results)} forks)")
             return Transition(to="SemanticSynthesisState", reason="Contracts merged, ready for synthesis", metadata={"branches": len(fork_results)})
         else:
             # No forks - skip synthesis, go directly to router
-            logger.info("🔄 [Merge] No forks, skipping synthesis")
+            self.logger.info("🔄 [Merge] No forks, skipping synthesis")
             return Transition(to="RouterState", reason="No synthesis needed", metadata={"branches": 0})
     
     def _contract_merge(self, fork_results: List[AsyncExecutionContext]) -> dict:
@@ -738,21 +796,21 @@ class MergeState(AsyncHierarchicalState):
         for fork_ctx in fork_results:
             contract_data = fork_ctx.memory.get("fork_contract")
             if not contract_data:
-                logger.warning(f"⚠️ [Merge] Fork {fork_ctx.memory.get('branch_id')} has no contract")
+                self.logger.warning(f"⚠️ [Merge] Fork {fork_ctx.memory.get('branch_id')} has no contract")
                 continue
             
             # 🔥 DEBUG: Log each fork's contract
-            logger.info(f"📦 [Merge] Processing fork {fork_ctx.memory.get('branch_id')}:")
-            logger.info(f"   Contract keys: {list(contract_data.keys())}")
-            logger.info(f"   Claims count: {len(contract_data.get('claims', []))}")
+            self.logger.info(f"📦 [Merge] Processing fork {fork_ctx.memory.get('branch_id')}:")
+            self.logger.info(f"   Contract keys: {list(contract_data.keys())}")
+            self.logger.info(f"   Claims count: {len(contract_data.get('claims', []))}")
             
             try:
                 contract = ForkResult(**contract_data)
                 
                 # 🔥 DEBUG: Log claims being added
-                logger.info(f"   Adding {len(contract.claims)} claims to merge:")
+                self.logger.info(f"   Adding {len(contract.claims)} claims to merge:")
                 for claim in contract.claims:
-                    logger.info(f"      - {claim.key}: {claim.value}")
+                    self.logger.info(f"      - {claim.key}: {claim.value}")
                 
                 for claim in contract.claims:
                     if claim.key not in all_claims:
@@ -771,7 +829,7 @@ class MergeState(AsyncHierarchicalState):
                     all_uncertain.append(uncertain.model_dump())
                 
             except Exception as e:
-                logger.error(f"❌ [Merge] Failed to parse fork contract: {e}")
+                self.logger.error(f"❌ [Merge] Failed to parse fork contract: {e}")
                 continue
         
         # Detect consensus and conflicts
@@ -803,7 +861,7 @@ class MergeState(AsyncHierarchicalState):
                         for v in variants
                     ]
                 }
-                logger.debug(f"✅ [Merge] Consensus on '{key}': {resolved[key]['value']} ({len(variants)} variants)")
+                self.logger.debug(f"✅ [Merge] Consensus on '{key}': {resolved[key]['value']} ({len(variants)} variants)")
             else:
                 # Conflict - multiple different values
                 
@@ -821,14 +879,14 @@ class MergeState(AsyncHierarchicalState):
                         "confidence": sum(c["confidence"] for sublist in unique_values.values() for c in sublist) / sum(len(sublist) for sublist in unique_values.values()),
                         "is_concatenated": True
                     }
-                    logger.info(f"✅ [Merge] Concatenated conflicting summaries ({len(unique_values)} variants)")
+                    self.logger.info(f"✅ [Merge] Concatenated conflicting summaries ({len(unique_values)} variants)")
                 
                 else:
                     # Logic for normal keys
                     conflicts[key] = []
                     for value_str, variants in unique_values.items():
                         conflicts[key].extend(variants)
-                    logger.warning(f"⚠️ [Merge] Conflict on '{key}': {len(conflicts[key])} different values")
+                    self.logger.warning(f"⚠️ [Merge] Conflict on '{key}': {len(conflicts[key])} different values")
         
         # 🔥 EPISTEMIC: Uncertainty reduces coverage, never invalidates claims
         uncertain_coverage = set(u["topic"] for u in all_uncertain)
@@ -849,8 +907,8 @@ class MergeState(AsyncHierarchicalState):
         
         if total_claims + total_uncertain > 0:
             omission_rate = total_uncertain / (total_claims + total_uncertain)
-            logger.info(f"📊 [Merge] Epistemic metrics:")
-            logger.info(f"   Omission rate: {omission_rate:.2%}")
+            self.logger.info(f"📊 [Merge] Epistemic metrics:")
+            self.logger.info(f"   Omission rate: {omission_rate:.2%}")
         
         # Count inferred claims
         inferred_count = sum(
@@ -861,13 +919,13 @@ class MergeState(AsyncHierarchicalState):
         
         if inferred_count + total_uncertain > 0:
             inference_ratio = inferred_count / (inferred_count + total_uncertain)
-            logger.info(f"   Inference ratio: {inference_ratio:.2%} (higher = better reasoning)")
+            self.logger.info(f"   Inference ratio: {inference_ratio:.2%} (higher = better reasoning)")
         
-        logger.info(f"📊 [Merge] Contract merge summary:")
-        logger.info(f"   ✅ Resolved: {len(resolved)} claims")
-        logger.info(f"   ⚠️  Conflicts: {len(conflicts)} claims")
-        logger.info(f"   📋 Coverage: {len(final_coverage)} topics")
-        logger.info(f"   ❓ Uncertain: {total_uncertain} topics")
+        self.logger.info(f"📊 [Merge] Contract merge summary:")
+        self.logger.info(f"   ✅ Resolved: {len(resolved)} claims")
+        self.logger.info(f"   ⚠️  Conflicts: {len(conflicts)} claims")
+        self.logger.info(f"   📋 Coverage: {len(final_coverage)} topics")
+        self.logger.info(f"   ❓ Uncertain: {total_uncertain} topics")
         
         return merged_contract.model_dump()
 
@@ -886,13 +944,13 @@ class SemanticSynthesisState(AsyncHierarchicalState):
         self.synthesis_strategy = synthesis_strategy
     
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🧬 [Synthesis] Consolidating fork outputs...")
+        self.logger.info("🧬 [Synthesis] Consolidating fork outputs...")
         
         # Get merged contracts
         research_context = await context.get_memory("research_context")
         
         if not research_context or not isinstance(research_context, dict):
-            logger.warning("⚠️ [Synthesis] No research context to synthesize")
+            self.logger.warning("⚠️ [Synthesis] No research context to synthesize")
             return Transition(to="RouterState", reason="No synthesis needed")
         
         # Build synthesis request
@@ -927,7 +985,7 @@ class SemanticSynthesisState(AsyncHierarchicalState):
             fork_outputs.append(f"**Information Gaps:** {', '.join(research_context['omissions'])}")
         
         if not fork_outputs:
-            logger.warning("⚠️ [Synthesis] No outputs to synthesize")
+            self.logger.warning("⚠️ [Synthesis] No outputs to synthesize")
             return Transition(to="RouterState", reason="Empty research context")
         
         request = SynthesisRequest(
@@ -946,7 +1004,7 @@ class SemanticSynthesisState(AsyncHierarchicalState):
                 raise ValueError("Empty synthesis result")
             
             if len(result.answer) > 50000:  # Token limit approximation
-                logger.warning(f"⚠️ [Synthesis] Result too long ({len(result.answer)} chars), truncating")
+                self.logger.warning(f"⚠️ [Synthesis] Result too long ({len(result.answer)} chars), truncating")
                 result.answer = result.answer[:50000] + "\n\n[Response truncated due to length]"
             
             # Store synthesis result
@@ -957,14 +1015,14 @@ class SemanticSynthesisState(AsyncHierarchicalState):
                 "inconsistencies": result.inconsistencies
             })
             
-            logger.info(f"✅ [Synthesis] Consolidated {len(fork_outputs)} outputs into {len(result.answer)} chars")
+            self.logger.info(f"✅ [Synthesis] Consolidated {len(fork_outputs)} outputs into {len(result.answer)} chars")
             
             return Transition(to="RouterState", reason="Synthesis complete")
             
         except Exception as e:
-            logger.error(f"❌ [Synthesis] Failed: {e}")
+            self.logger.error(f"❌ [Synthesis] Failed: {e}")
             # Fallback: skip synthesis, use raw contracts
-            logger.info("🔄 [Synthesis] Falling back to raw contracts")
+            self.logger.info("🔄 [Synthesis] Falling back to raw contracts")
             return Transition(to="RouterState", reason="Synthesis failed, using raw contracts")
 
 
@@ -977,7 +1035,7 @@ class AnswerState(TerminalState):
         self.llm = llm
 
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("✅ [Answer] Generating final response...")
+        self.logger.info("✅ [Answer] Generating final response...")
 
         # Build messages
         system_instruction = await context.get_memory("system_instruction", "")
@@ -988,7 +1046,7 @@ class AnswerState(TerminalState):
             redirect_prompt = await context.get_memory("redirect_system_prompt")
             if redirect_prompt:
                 system_instruction = redirect_prompt
-                logger.info("↪️ [Answer] Using Redirect System Prompt")
+                self.logger.info("↪️ [Answer] Using Redirect System Prompt")
 
         messages = [{"role": "system", "content": system_instruction}]
 
@@ -1033,8 +1091,8 @@ class AnswerState(TerminalState):
         
         if synthesis_result and synthesis_result.get("answer"):
             # Inject synthesized context
-            logger.info(f"📚 [Answer] Injecting synthesized context ({len(synthesis_result['answer'])} chars)")
-            logger.info(f"🔍 [Answer] Synthesis preview: {synthesis_result['answer'][:100]}...")
+            self.logger.info(f"📚 [Answer] Injecting synthesized context ({len(synthesis_result['answer'])} chars)")
+            self.logger.info(f"🔍 [Answer] Synthesis preview: {synthesis_result['answer'][:100]}...")
             messages.append({
                 "role": "system",
                 "content": f"""Use the following synthesized research findings to answer the user's question.
@@ -1059,7 +1117,7 @@ SYNTHESIZED FINDINGS:
             if research_context and isinstance(research_context, dict):
                 # Check if it's a MergedContract (has 'resolved' and 'conflicts' keys)
                 if "resolved" in research_context and "conflicts" in research_context:
-                    logger.info(f"📚 [Answer] Injecting contract from {research_context.get('total_forks', 0)} fork(s)")
+                    self.logger.info(f"📚 [Answer] Injecting contract from {research_context.get('total_forks', 0)} fork(s)")
                     
                     # Format contract for LLM
                     contract_text = "# Research Contracts\n\n"
@@ -1090,7 +1148,7 @@ SYNTHESIZED FINDINGS:
                         contract_text += f"## ❌ Omissions\n{', '.join(research_context['omissions'])}\n\n"
                     
                     # 🔥 DEBUG: Log contract being injected
-                    logger.info(f"📝 [Answer] Contract text being injected ({len(contract_text)} chars):")
+                    self.logger.info(f"📝 [Answer] Contract text being injected ({len(contract_text)} chars):")
                     
                     messages.append({
                         "role": "system",
@@ -1117,7 +1175,7 @@ Remember: The user should NOT see the internal contract structure. Present infor
                     })
                 else:
                     # Legacy format (old semantic merge)
-                    logger.info(f"📚 [Answer] Injecting legacy research from {research_context.get('total_branches', 0)} branches")
+                    self.logger.info(f"📚 [Answer] Injecting legacy research from {research_context.get('total_branches', 0)} branches")
                     messages.append({
                         "role": "system",
                         "content": "Use the following research results to answer the user's question:"
@@ -1131,7 +1189,7 @@ Remember: The user should NOT see the internal contract structure. Present infor
         
         if enable_streaming:
             # Stream response
-            logger.info("🌊 [Answer] Streaming initialized")
+            self.logger.info("🌊 [Answer] Streaming initialized")
             # 🛡️ Safety Check Before LLM Call (Streaming)
             await context.increment_llm_call()
             
@@ -1157,7 +1215,7 @@ Remember: The user should NOT see the internal contract structure. Present infor
                 await context.set_memory("total_requests", context.safety_monitor.count)
         else:
             # Non-streaming response
-            logger.info("📝 [Answer] Generating complete response")
+            self.logger.info("📝 [Answer] Generating complete response")
             # 🛡️ Safety Check Before LLM Call (Non-Streaming)
             await context.increment_llm_call()
             # 🔥 Fix: chat() only takes messages, not context
@@ -1194,15 +1252,15 @@ class RetryState(AsyncHierarchicalState):
         super().__init__(parent)
 
     async def handle(self, context: AsyncExecutionContext):
-        logger.warning("⚠️ [Retry] Attempting recovery...")
+        self.logger.warning("⚠️ [Retry] Attempting recovery...")
 
         await context.increment_iteration()
 
         if context.current_iteration >= context.max_iterations:
-            logger.warning("⚠️ [Retry] Max retries reached. Proceeding to AnswerState (Best Effort).")
+            self.logger.warning("⚠️ [Retry] Max retries reached. Proceeding to AnswerState (Best Effort).")
             return Transition(to="AnswerState", reason="Max retries reached")
         else:
-            logger.warning(f"⚠️ [Retry] Attempt {context.current_iteration}/{context.max_iterations}")
+            self.logger.warning(f"⚠️ [Retry] Attempt {context.current_iteration}/{context.max_iterations}")
             return Transition(to="RouterState", reason="Retrying execution", metadata={"attempt": context.current_iteration})
 
 
@@ -1214,7 +1272,7 @@ class FailState(TerminalState):
         super().__init__(parent)
 
     async def handle(self, context: AsyncExecutionContext):
-        logger.error("❌ [Fail] Terminating agent.")
+        self.logger.error("❌ [Fail] Terminating agent.")
         return None
 
 
@@ -1235,7 +1293,7 @@ class IntentAnalysisState(AsyncHierarchicalState):
         self.system_instruction = system_instruction
 
     async def handle(self, context: AsyncExecutionContext):
-        logger.info("🧠 [IntentAnalysis] Analyzing user intent...")
+        self.logger.info("🧠 [IntentAnalysis] Analyzing user intent...")
         
         # Check if already analyzed to prevent loops
         if await context.get_memory("intent_analyzed"):
@@ -1370,14 +1428,14 @@ IMPORTANTE:
                 
                 json_str = content[start_idx:end_idx]
                 analysis = json.loads(json_str)
-                logger.info("✅ [IntentAnalysis] JSON parsed successfully")
+                self.logger.info("✅ [IntentAnalysis] JSON parsed successfully")
             except Exception as e:
-                logger.warning(f"⚠️ [IntentAnalysis] JSON parsing failed: {e}")
+                self.logger.warning(f"⚠️ [IntentAnalysis] JSON parsing failed: {e}")
                 analysis = None
             
             # Fallback
             if analysis is None:
-                logger.info("🔄 [IntentAnalysis] Using fallback")
+                self.logger.info("🔄 [IntentAnalysis] Using fallback")
                 analysis = {
                     "intent": "unknown",
                     "context_from_history": [],
@@ -1397,27 +1455,27 @@ IMPORTANTE:
             # Enhanced query
             if analysis.get("enhanced_query"):
                 context.user_query = analysis.get("enhanced_query")
-                logger.info(f"✨ [IntentAnalysis] Query enhanced: {context.user_query}")
+                self.logger.info(f"✨ [IntentAnalysis] Query enhanced: {context.user_query}")
             
             # Log results
-            logger.info(f"✅ [IntentAnalysis] Intent: {analysis.get('intent', 'unknown')}")
-            logger.info(f"📝 [IntentAnalysis] Todo list ({len(analysis.get('todo_list', []))} items):")
+            self.logger.info(f"✅ [IntentAnalysis] Intent: {analysis.get('intent', 'unknown')}")
+            self.logger.info(f"📝 [IntentAnalysis] Todo list ({len(analysis.get('todo_list', []))} items):")
             for i, task in enumerate(analysis.get('todo_list', []), 1):
-                logger.info(f"   {i}. {task}")
+                self.logger.info(f"   {i}. {task}")
                 
             # Redirect Check
             complexity = analysis.get("complexity", "complex")
             needs_tools = analysis.get("needs_tools", True)
             
             if complexity == "simple" and not needs_tools:
-                logger.info("🚀 [IntentAnalysis] Redirecting to AnswerState (Simple Query)")
+                self.logger.info("🚀 [IntentAnalysis] Redirecting to AnswerState (Simple Query)")
                 await context.set_memory("redirect_mode", True)
                 return Transition(to="AnswerState", reason="Simple query redirect")
                 
             return Transition(to="RouterState", reason="Analysis complete")
             
         except Exception as e:
-            logger.error(f"❌ [IntentAnalysis] Failed: {e}")
+            self.logger.error(f"❌ [IntentAnalysis] Failed: {e}")
             await context.set_memory("intent_analyzed", True)
             return Transition(to="RouterState", reason="Analysis failed")
 
@@ -1455,6 +1513,19 @@ class AsyncAgentEngine:
         intent_analysis_llm: Optional['AsyncLLMClient'] = None,  # - LLM for intent analysis
         # 🔥 Redirect Feature
         redirect_system_prompt: str = "Você é um assistente útil. Responda a pergunta do usuário de forma direta.",
+        
+        # 🔥 Recovery Config
+        max_retries: int = 3,  # Max retries for validation failure
+        
+        # 🔥 Persistence Config
+        enable_snapshots: bool = True,  # Enable snapshot saving
+        enable_logging: bool = True,  # Enable logging
+        
+        # 🔥 Context Pruning Config
+        enable_context_pruning: bool = False,  # Enable context pruning (opt-in)
+        context_pruner: Optional[AsyncContextPruner] = None,  # Custom pruner
+        pruner_keep_recent: int = 4,  # Keep last N tool calls full
+        pruner_max_length: int = 200,  # Max length for truncated results
         
         # 🔥 Strategy Config
         contract_strategy = None,
@@ -1507,6 +1578,13 @@ class AsyncAgentEngine:
         # 🔥 Redirect Feature
         self.redirect_system_prompt = redirect_system_prompt
         
+        # 🔥 Recovery Config
+        self.max_retries = max_retries
+        
+        # 🔥 Persistence Config
+        self.enable_snapshots = enable_snapshots
+        self.enable_logging = enable_logging
+        
         # 🔥 Strategy Injection
         self.contract_strategy = contract_strategy
         self.synthesis_strategy = synthesis_strategy
@@ -1520,11 +1598,34 @@ class AsyncAgentEngine:
 
         self.states = {}
 
+        # Setup Logger
+        if self.enable_logging:
+            self.logger = logging.getLogger("AsyncAgentEngine")
+        else:
+            self.logger = DummyLogger()
+
         # Initialize hierarchy
-        self.root = AgentRootState()
+        self.root = AgentRootState(logger=self.logger)
         self.states["AgentRootState"] = self.root
 
-        self.policy = ContextPolicyState(self.root)
+        # 🔥 Context Pruning: Insert ContextPolicyState if enabled
+        if enable_context_pruning:
+            # Create or use custom pruner
+            if context_pruner:
+                self.pruner = context_pruner
+            else:
+                self.pruner = AsyncContextPruner(
+                    keep_recent=pruner_keep_recent,
+                    max_length=pruner_max_length
+                )
+            
+            # Insert policy layer in hierarchy
+            self.policy = AsyncContextPolicyState(self.root, self.pruner, logger=self.logger)
+            self.states["AsyncContextPolicyState"] = self.policy
+            self.logger.info(f"✂️ [Engine] Context pruning enabled (keep_recent={pruner_keep_recent}, max_length={pruner_max_length})")
+        else:
+            # No pruning - policy points directly to root
+            self.policy = self.root
         self.states["ContextPolicyState"] = self.policy
 
         self.reasoning = ReasoningState(self.policy)
@@ -1555,6 +1656,11 @@ class AsyncAgentEngine:
 
         self.validation_state = ValidationState(self.execution, self.llm, self.validation_fn)
         self.states["ValidationState"] = self.validation_state
+        
+        # Inject logger into all states
+        for state in self.states.values():
+            if hasattr(state, 'logger'):
+                state.logger = self.logger
 
         self.answer_state = AnswerState(self.reasoning, self.llm)
         self.states["AnswerState"] = self.answer_state
@@ -1608,7 +1714,7 @@ class AsyncAgentEngine:
             self.synthesis_state = SemanticSynthesisState(self.reasoning, synthesis_strat)
             self.states["SemanticSynthesisState"] = self.synthesis_state
             
-            logger.info("✅ Parallel execution states initialized")
+            self.logger.info("✅ Parallel execution states initialized")
 
             # 🔥 FORK OVERRIDES: Ensure forks define contracts instead of answering
             # Redirect Validation -> Answer to ForkContract
@@ -1651,6 +1757,9 @@ class AsyncAgentEngine:
     
     def _save_snapshot(self, context: AsyncExecutionContext, event_name: str):
         """Save context snapshot to disk/log."""
+        if not self.enable_snapshots:
+            return  # Snapshot saving disabled
+
         try:
             snapshot = context.snapshot()
             
@@ -1668,9 +1777,9 @@ class AsyncAgentEngine:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, ensure_ascii=False, indent=2)
                 
-            logger.debug(f"💾 Snapshot saved to {filepath}")
+            self.logger.debug(f"💾 Snapshot saved to {filepath}")
         except Exception as e:
-            logger.error(f"Failed to save snapshot: {e}")
+            self.logger.error(f"Failed to save snapshot: {e}")
     
     # 🔥 Custom State Registration API
     
@@ -1690,7 +1799,7 @@ class AsyncAgentEngine:
         """
         self.custom_states[name] = state
         self.states[name] = state
-        logger.info(f"🔧 [Engine] Registered custom state: {name}")
+        self.logger.info(f"🔧 [Engine] Registered custom state: {name}")
     
     def override_transition(
         self, 
@@ -1718,14 +1827,14 @@ class AsyncAgentEngine:
         """
         # Validate target state exists
         if new_target not in self.states and new_target not in self.custom_states:
-            logger.warning(f"⚠️ [Engine] Override target '{new_target}' not registered yet")
+            self.logger.warning(f"⚠️ [Engine] Override target '{new_target}' not registered yet")
         
         self.transition_overrides.append({
             "from": from_state,
             "condition": condition,
             "target": new_target
         })
-        logger.info(f"🔧 [Engine] Override registered: {from_state} -> {new_target}")
+        self.logger.info(f"🔧 [Engine] Override registered: {from_state} -> {new_target}")
     
     async def _analyze_intent(self, context: AsyncExecutionContext):
         """
@@ -1737,19 +1846,19 @@ class AsyncAgentEngine:
         - Detect language
         - Enhance query with context from history
         """
-        logger.info("=" * 80)
-        logger.info("🧠 [IntentAnalysis] Analyzing user intent...")
-        logger.info(f"📝 [IntentAnalysis] Query: {context.user_query[:100]}...")
-        logger.info("=" * 80)
+        self.logger.info("=" * 80)
+        self.logger.info("🧠 [IntentAnalysis] Analyzing user intent...")
+        self.logger.info(f"📝 [IntentAnalysis] Query: {context.user_query[:100]}...")
+        self.logger.info("=" * 80)
         
-        logger.info("🔥🔥🔥 [DEBUG] IntentAnalysisState.handle() v3.0 LOADED")
+        self.logger.info("🔥🔥🔥 [DEBUG] IntentAnalysisState.handle() v3.0 LOADED")
         
         try:
             # Get chat history
             chat_history = await context.get_memory("chat_history", [])
             current_query = context.user_query
             
-            logger.info(f"[IntentAnalysis] Chat history length: {len(chat_history)}")
+            self.logger.info(f"[IntentAnalysis] Chat history length: {len(chat_history)}")
             
             # Build analysis prompt
             messages = [{
@@ -1791,7 +1900,7 @@ REGRAS:
                 "content": f"Pergunta atual: {current_query}\n\nRetorne APENAS o JSON da análise, sem texto adicional."
             })
             
-            logger.info(f"[IntentAnalysis] Calling LLM...")
+            self.logger.info(f"[IntentAnalysis] Calling LLM...")
             
             # Call LLM for intent analysis
             response = await self.intent_analysis_llm.chat(messages)
@@ -1803,8 +1912,8 @@ REGRAS:
             # Extract JSON from response (handle markdown code blocks)
             content = response.get("content", "").strip()
             
-            logger.info("🔥 [DEBUG] Using ROBUST JSON extraction v2.0")
-            logger.info(f"[IntentAnalysis] Raw LLM response length: {len(content)} chars")
+            self.logger.info("🔥 [DEBUG] Using ROBUST JSON extraction v2.0")
+            self.logger.info(f"[IntentAnalysis] Raw LLM response length: {len(content)} chars")
             
             # Robust JSON extraction with guaranteed fallback
             analysis = None
@@ -1812,7 +1921,7 @@ REGRAS:
                 import json
                 
                 if not content:
-                    logger.warning("⚠️ [IntentAnalysis] Empty LLM response")
+                    self.logger.warning("⚠️ [IntentAnalysis] Empty LLM response")
                     raise ValueError("Empty response content")
 
                 # Remove markdown code blocks
@@ -1847,16 +1956,16 @@ REGRAS:
                 json_str = content[start_idx:end_idx]
                 
                 analysis = json.loads(json_str)
-                logger.info(f"✅ [IntentAnalysis] JSON parsed successfully")
+                self.logger.info(f"✅ [IntentAnalysis] JSON parsed successfully")
             except Exception as e:
                 # Catch ALL parsing errors - DO NOT RE-RAISE
-                logger.warning(f"⚠️ [IntentAnalysis] JSON parsing failed: {e}")
-                logger.warning(f"⚠️ [IntentAnalysis] Content preview: {content[:200] if content else 'EMPTY'}...")
+                self.logger.warning(f"⚠️ [IntentAnalysis] JSON parsing failed: {e}")
+                self.logger.warning(f"⚠️ [IntentAnalysis] Content preview: {content[:200] if content else 'EMPTY'}...")
                 analysis = None  # Will trigger fallback below
             
             # Ensure analysis is set (fallback if parsing failed)
             if analysis is None:
-                logger.info("🔄 [IntentAnalysis] Using fallback default analysis")
+                self.logger.info("🔄 [IntentAnalysis] Using fallback default analysis")
                 analysis = {
                     "intent": "unknown",
                     "required_context": [],
@@ -1878,11 +1987,11 @@ REGRAS:
             context.user_query = enhanced_query
             
             # 🔥 LOG RESULTS
-            logger.info(f"✅ [IntentAnalysis] Intent: {analysis.get('intent', 'unknown')}")
-            logger.info(f"🌍 [IntentAnalysis] Language: {analysis.get('language', 'unknown')}")
-            logger.info(f"📝 [IntentAnalysis] Todo list ({len(analysis.get('todo_list', []))} items):")
+            self.logger.info(f"✅ [IntentAnalysis] Intent: {analysis.get('intent', 'unknown')}")
+            self.logger.info(f"🌍 [IntentAnalysis] Language: {analysis.get('language', 'unknown')}")
+            self.logger.info(f"📝 [IntentAnalysis] Todo list ({len(analysis.get('todo_list', []))} items):")
             for i, task in enumerate(analysis.get('todo_list', []), 1):
-                logger.info(f"   {i}. {task}")
+                self.logger.info(f"   {i}. {task}")
             
             # Log context from history if available
             # 🔥 Handle new key 'required_context' or old 'context_from_history'
@@ -1893,17 +2002,17 @@ REGRAS:
             await context.set_memory("intent_analysis", analysis)
             
             if context_items:
-                logger.info(f"📚 [IntentAnalysis] Context from history:")
+                self.logger.info(f"📚 [IntentAnalysis] Context from history:")
                 for item in context_items:
-                    logger.info(f"   - {item}")
+                    self.logger.info(f"   - {item}")
             
-            logger.info(f"🔄 [IntentAnalysis] Enhanced query: {enhanced_query[:100]}...")
-            logger.info("=" * 80)
+            self.logger.info(f"🔄 [IntentAnalysis] Enhanced query: {enhanced_query[:100]}...")
+            self.logger.info("=" * 80)
             
         except Exception as e:
-            logger.error(f"❌ [IntentAnalysis] Failed: {e}")
+            self.logger.error(f"❌ [IntentAnalysis] Failed: {e}")
             import traceback
-            logger.error(traceback.format_exc())
+            self.logger.error(traceback.format_exc())
             
             # Set flag even on error to prevent infinite loop
             await context.set_memory("intent_analyzed", True)
@@ -1921,17 +2030,17 @@ REGRAS:
         # 🔥 0. Forced initial state via arg
         if initial_state_name and initial_state_name in self.states:
             current_state = self.states[initial_state_name]
-            logger.info(f"🎯 [Engine] Dispatch starting from forced state: {initial_state_name}")
+            self.logger.info(f"🎯 [Engine] Dispatch starting from forced state: {initial_state_name}")
 
         # 🔥 1. Start from valid global initial state (if not forced)
         elif self.initial_state_name and self.initial_state_name in self.states and not is_fork:
             current_state = self.states[self.initial_state_name]
-            logger.info(f"🎯 [Engine] Starting from custom global initial state: {self.initial_state_name}")
+            self.logger.info(f"🎯 [Engine] Starting from custom global initial state: {self.initial_state_name}")
             # Check if already analyzed to prevent loops
             intent_analyzed = await context.get_memory("intent_analyzed")
             if not intent_analyzed and self.enable_intent_analysis:
                 current_state = self.states["IntentAnalysisState"]
-                logger.info("🎯 [Engine] Starting with Intent Analysis (Initial State Override)")
+                self.logger.info("🎯 [Engine] Starting with Intent Analysis (Initial State Override)")
             # else: current_state remains custom initial state
 
         # 🔥 2. Default flow: Check Intent Analysis before Router
@@ -1939,7 +2048,7 @@ REGRAS:
             intent_analyzed = await context.get_memory("intent_analyzed")
             if not intent_analyzed:
                 current_state = self.states["IntentAnalysisState"]
-                logger.info("🎯 [Engine] Starting default flow with Intent Analysis")
+                self.logger.info("🎯 [Engine] Starting default flow with Intent Analysis")
             else:
                 current_state = self.router_state
 
@@ -1948,13 +2057,22 @@ REGRAS:
 
         while current_state:
             state_name = type(current_state).__name__
-            logger.info(f"📍 [Engine] Current state: {state_name}")
+            self.logger.info(f"📍 [Engine] Current state: {state_name}")
+
+            # 🔥 MIDDLEWARE HOOK: Check lineage for ContextPolicy and trigger
+            # This ensures pruning happens before the specific state logic
+            temp_state = current_state
+            while temp_state:
+                if isinstance(temp_state, AsyncContextPolicyState):
+                    await temp_state.on_enter(context)
+                    break
+                temp_state = temp_state.parent
 
             # Handle state (async)
             result = await current_state.handle(context)
 
             if result is None:
-                logger.info(f"🏁 [Engine] Reached terminal state: {state_name}")
+                self.logger.info(f"🏁 [Engine] Reached terminal state: {state_name}")
                 break
             
             # 🔥 Apply transition overrides (custom state injection)
@@ -1970,23 +2088,23 @@ REGRAS:
                                     reason=f"Override: {result.reason}",
                                     metadata=result.metadata
                                 )
-                                logger.info(f"🔀 [Override] {state_name}: {original_target} -> {result.to}")
+                                self.logger.info(f"🔀 [Override] {state_name}: {original_target} -> {result.to}")
                                 break
                         except Exception as e:
-                            logger.error(f"❌ [Override] Condition failed: {e}")
+                            self.logger.error(f"❌ [Override] Condition failed: {e}")
                             # Continue without override
 
             # Resolve transition
             if isinstance(result, Transition):
                 next_state = self._find_state_provider(result.to)
-                logger.info(f"🔄 Transition: {state_name} -> {result.to} (reason: {result.reason})")
+                self.logger.info(f"🔄 Transition: {state_name} -> {result.to} (reason: {result.reason})")
                 if result.metadata:
-                    logger.debug(f"   Metadata: {result.metadata}")
+                    self.logger.debug(f"   Metadata: {result.metadata}")
             else:
                 # Legacy: direct state return
                 next_state = result
                 next_name = type(next_state).__name__
-                logger.info(f"🔄 Transition: {state_name} -> {next_name}")
+                self.logger.info(f"🔄 Transition: {state_name} -> {next_name}")
 
             # Save snapshot
             self._save_snapshot(context, f"transition_{state_name}_to_{type(next_state).__name__}")
@@ -1999,7 +2117,11 @@ REGRAS:
         """
         # Create context with safety monitor
         monitor = SafetyMonitor(max_requests=self.max_global_requests)
-        context = AsyncExecutionContext(user_query=query, safety_monitor=monitor)
+        context = AsyncExecutionContext(
+            user_query=query, 
+            safety_monitor=monitor,
+            max_iterations=self.max_retries
+        )
         
         await context.set_memory("system_instruction", self.system_instruction)
         await context.set_memory("redirect_system_prompt", self.redirect_system_prompt)  # Store redirect prompt

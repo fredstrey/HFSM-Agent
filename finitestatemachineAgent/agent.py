@@ -90,7 +90,10 @@ class Agent:
         
         # Safety & Limits
         max_global_requests: int = 50,
+        max_retries: int = 3,  # Max retries for validation failure
         skip_validation: bool = True,
+        enable_snapshots: bool = True,  # New param
+        enable_logging: bool = True,  # New param
         
         # Custom Functions & Hooks
         validation_fn: Optional[Callable] = None,
@@ -103,6 +106,12 @@ class Agent:
         # Strategy Configuration
         contract_strategy: Union[str, ForkContractStrategy] = "epistemic",
         synthesis_strategy: Union[str, SynthesisStrategy] = "llm",
+        
+        # Context Pruning
+        enable_context_pruning: bool = False,  # Enable context pruning (opt-in)
+        context_pruner = None,  # Custom AsyncContextPruner instance
+        pruner_keep_recent: int = 4,  # Keep last N tool calls full
+        pruner_max_length: int = 200,  # Max length for truncated results
         
         # Advanced (pass-through to AsyncAgentEngine)
         **kwargs
@@ -124,7 +133,10 @@ class Agent:
             contract_strategy: "epistemic" (default) or "simple" (text only)
             synthesis_strategy: "llm" (default) or "concat" (simple append)
             max_global_requests: Global safety limit for LLM calls
+            max_retries: Max retries for validation failure (default: 3)
             skip_validation: Skip tool validation state
+            enable_snapshots: Enable saving JSON snapshots (default: True)
+            enable_logging: Enable general logging (default: True)
             **kwargs: Additional arguments passed to AsyncAgentEngine
         """
         self.llm_provider = llm_provider
@@ -196,8 +208,15 @@ class Agent:
             intent_analysis_llm=self.llm, # intent analysis llm
             max_parallel_branches=max_parallel_branches, # max parallel branches (if enable_parallel_planning)
             max_global_requests=max_global_requests, # max global requests for LLM calls
+            max_retries=max_retries, # max retries for validation failure
+            enable_snapshots=enable_snapshots, # enable snapshots
+            enable_logging=enable_logging, # enable logging
             post_router_hook=post_router_hook, # post router hook to modify router decision
             initial_state=initial_state,  # Param name is initial_state, not initial_state_name
+            enable_context_pruning=enable_context_pruning,  # enable context pruning
+            context_pruner=context_pruner,  # custom pruner
+            pruner_keep_recent=pruner_keep_recent,  # keep recent N calls
+            pruner_max_length=pruner_max_length,  # max length for truncated results
             **kwargs
         )
         

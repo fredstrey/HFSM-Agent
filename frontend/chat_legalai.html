@@ -53,6 +53,61 @@
             opacity: 0.9;
         }
 
+        /* Toggle Switch */
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 34px;
+            height: 20px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 12px;
+            width: 12px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked+.slider {
+            background-color: #2196F3;
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(14px);
+        }
+
         .chat-messages {
             flex: 1;
             overflow-y: auto;
@@ -222,6 +277,21 @@
         <div class="chat-header">
             <h1>⚖️ Legal.AI</h1>
             <p>Consultor Jurídico Especializado em Direito e Legislação</p>
+            <div class="toggle-container">
+                <label class="switch">
+                    <input type="checkbox" id="snapshotToggle" checked>
+                    <span class="slider"></span>
+                </label>
+                <span>Snapshots</span>
+
+                <span style="width: 10px;"></span>
+
+                <label class="switch">
+                    <input type="checkbox" id="loggingToggle" checked>
+                    <span class="slider"></span>
+                </label>
+                <span>Logs</span>
+            </div>
         </div>
 
         <div class="history-info">
@@ -364,7 +434,9 @@
                     body: JSON.stringify({
                         message: message,
                         stream: true,
-                        chat_history: historyToSend.slice(0, -1)
+                        chat_history: historyToSend.slice(0, -1),
+                        enable_snapshots: document.getElementById('snapshotToggle').checked,
+                        enable_logging: document.getElementById('loggingToggle').checked
                     })
                 });
 

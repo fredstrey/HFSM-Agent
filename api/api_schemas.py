@@ -15,7 +15,8 @@ class ChatRequest(BaseModel):
     stream: bool = Field(default=True, description="If streaming should be used")
     max_iterations: int = Field(default=3, description="Maximum number of reasoning steps (max_iterations)")
     chat_history: Optional[List[ChatMessage]] = Field(default=None, description="Chat history (last 3 interactions)")
-
+    enable_snapshots: bool = Field(default=True, description="Enable snapshot saving")
+    enable_logging: bool = Field(default=True, description="Enable general logging")
 
 class ChatStreamChunk(BaseModel):
     """Chunk of streaming"""
