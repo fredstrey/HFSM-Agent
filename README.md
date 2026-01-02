@@ -11,7 +11,7 @@ Both chatbots share the same HFSM framework with domain-specific tools and perso
 
 ## 📺 Demo
 
-[![Finance.AI Demo](https://img.youtube.com/vi/gRtdQdl3ApI/0.jpg)](https://youtu.be/gRtdQdl3ApI)
+[![Demo](https://img.youtube.com/vi/gRtdQdl3ApI/0.jpg)](https://youtu.be/gRtdQdl3ApI)
 
 ### Screenshots
 
