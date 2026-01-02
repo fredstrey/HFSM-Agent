@@ -19,8 +19,7 @@ from pydantic import BaseModel, Field
 from core.context_async import AsyncExecutionContext, SafetyMonitor
 from core.executor_async import AsyncToolExecutor
 from finitestatemachineAgent.transition import Transition
-from finitestatemachineAgent.fork_states import ResearchForkState, ForkSummaryState
-
+from finitestatemachineAgent.fork_states import ResearchForkState, ForkSummaryState, ForkContractState
 # Setup logging
 logger = logging.getLogger("AsyncAgentEngine")
 logger.setLevel(logging.INFO)
@@ -262,7 +261,10 @@ class RouterState(AsyncHierarchicalState):
         
         # 🔥 Apply post-hook if provided (domain-specific logic)
         if self.post_hook:
-            transition = await self.post_hook(context, transition)
+            hook_result = await self.post_hook(context, transition)
+            # Only override if hook returns a new transition (None means "keep original")
+            if hook_result is not None:
+                transition = hook_result
         
         return transition
 
@@ -620,8 +622,8 @@ class ForkDispatchState(AsyncHierarchicalState):
         
         # 🔥 NEW: Start from ResearchForkState (not RouterState)
         # This bypasses the full Router logic for efficiency
-        initial_state = self.find_state_by_type("ResearchForkState")
-        await self.engine.dispatch(fork_ctx)
+        # Pass explicitly to dispatch
+        await self.engine.dispatch(fork_ctx, initial_state_name="ResearchForkState")
         
         logger.info(f"🌿 [Fork:{branch_id}] Execution complete")
         return fork_ctx
@@ -924,6 +926,15 @@ class AnswerState(TerminalState):
 
         # Build messages
         system_instruction = await context.get_memory("system_instruction", "")
+        
+        # 🔥 Redirect Feature Override
+        redirect_mode = await context.get_memory("redirect_mode", False)
+        if redirect_mode:
+            redirect_prompt = await context.get_memory("redirect_system_prompt")
+            if redirect_prompt:
+                system_instruction = redirect_prompt
+                logger.info("↪️ [Answer] Using Redirect System Prompt")
+
         messages = [{"role": "system", "content": system_instruction}]
 
         # Add history
@@ -1056,10 +1067,6 @@ Remember: The user should NOT see the internal contract structure. Present infor
                         "role": "system",
                         "content": "Use the following research results to answer the user's question:"
                     })
-                    messages.append({
-                        "role": "user",
-                        "content": json.dumps(research_context, ensure_ascii=False, indent=2)
-                    })
 
         # 2. Add User Query
         messages.append({"role": "user", "content": context.user_query})
@@ -1072,10 +1079,27 @@ Remember: The user should NOT see the internal contract structure. Present infor
             logger.info("🌊 [Answer] Streaming initialized")
             # 🛡️ Safety Check Before LLM Call (Streaming)
             await context.increment_llm_call()
-            stream = self.llm.chat_stream(messages, context)
             
-            # Store stream for consumption
-            await context.set_memory("answer_stream", stream)
+            # Create wrapper to capture usage from stream
+            llm_stream = self.llm.chat_stream(messages)
+            
+            async def stream_with_usage():
+                """Wrapper that captures usage from stream metadata."""
+                async for token in llm_stream:
+                    # Check if token is usage metadata (dict with __usage__ key)
+                    if isinstance(token, dict) and "__usage__" in token:
+                        # Store usage in context
+                        await context.accumulate_usage(token["__usage__"])
+                    else:
+                        # Regular token, yield it
+                        yield token
+            
+            # Store wrapped stream for consumption
+            await context.set_memory("answer_stream", stream_with_usage())
+            
+            # Store total requests (same as non-streaming mode)
+            if hasattr(context, 'safety_monitor'):
+                await context.set_memory("total_requests", context.safety_monitor.count)
         else:
             # Non-streaming response
             logger.info("📝 [Answer] Generating complete response")
@@ -1092,6 +1116,10 @@ Remember: The user should NOT see the internal contract structure. Present infor
             
             # Store for access
             await context.set_memory("final_answer", final_answer)
+            
+            # Store total requests (engine-level metric)
+            if hasattr(context, 'safety_monitor'):
+                await context.set_memory("total_requests", context.safety_monitor.count)
             
             # Create fake stream for compatibility
             async def stream_complete():
@@ -1135,6 +1163,92 @@ class FailState(TerminalState):
         return None
 
 
+class IntentAnalysisState(AsyncHierarchicalState):
+    """
+    Standard state for analyzing user intent before routing.
+    
+    Analyzes:
+    - Intent
+    - Context from history
+    - Complexity & Tool needs (for redirect)
+    - Language
+    """
+    def __init__(self, parent, llm, system_instruction):
+        super().__init__(parent)
+        self.llm = llm
+        self.system_instruction = system_instruction
+
+    async def handle(self, context: AsyncExecutionContext):
+        logger.info("🧠 [IntentAnalysis] Analyzing user intent...")
+        
+        # Check if already analyzed to prevent loops
+        if await context.get_memory("intent_analyzed"):
+            return Transition(to="RouterState", reason="Already analyzed")
+
+        try:
+            chat_history = await context.get_memory("chat_history", [])
+            current_query = context.user_query
+            
+            # Build prompt
+            messages = [{
+                "role": "system",
+                "content": f"{self.system_instruction}\n\n"
+                           f"TAREFA: Analise a intenção e complexidade.\n"
+                           f"JSON OBRIGATÓRIO:\n"
+                           f"{{\n"
+                           f'    "intent": "resumo",\n'
+                           f'    "context_from_history": [],\n'
+                           f'    "enhanced_query": "query",\n'
+                           f'    "language": "pt",\n'
+                           f'    "complexity": "simple|complex",\n'
+                           f'    "needs_tools": true|false\n'
+                           f"}}\n"
+                           f"DEFINIÇÕES:\n"
+                           f'- "complexity": "simple" se for saudação ou trivial. "complex" se requer raciocínio.\n'
+                           f'- "needs_tools": true se requer dados externos. false se for trivial.'
+            }]
+            
+            if chat_history:
+                messages.extend(chat_history[-5:])
+                
+            messages.append({"role": "user", "content": f"Query: {current_query}"})
+            
+            # Call LLM
+            response = await self.llm.chat(messages)
+            content = response.get("content", "").strip()
+            
+            # Clean Markdown
+            if "```" in content:
+                content = content.replace("```json", "").replace("```", "")
+            
+            analysis = json.loads(content.strip())
+            
+            # Store in context
+            await context.set_memory("intent_analysis", analysis)
+            await context.set_memory("intent_analyzed", True)
+            await context.set_memory("user_language", analysis.get("language", "pt"))
+            
+            # Enhanced query
+            if analysis.get("enhanced_query"):
+                context.user_query = analysis.get("enhanced_query")
+                logger.info(f"✨ [IntentAnalysis] Query enhanced: {context.user_query}")
+                
+            # Redirect Check
+            complexity = analysis.get("complexity", "complex")
+            needs_tools = analysis.get("needs_tools", True)
+            
+            if complexity == "simple" and not needs_tools:
+                logger.info("🚀 [IntentAnalysis] Redirecting to AnswerState (Simple Query)")
+                await context.set_memory("redirect_mode", True)
+                return Transition(to="AnswerState", reason="Simple query redirect")
+                
+            return Transition(to="RouterState", reason="Analysis complete")
+            
+        except Exception as e:
+            logger.error(f"❌ [IntentAnalysis] Failed: {e}")
+            await context.set_memory("intent_analyzed", True)
+            return Transition(to="RouterState", reason="Analysis failed")
+
 # =================================================================================================
 # Agent Engine
 # =================================================================================================
@@ -1166,7 +1280,13 @@ class AsyncAgentEngine:
         initial_state: Optional[str] = None,  # 🔥 NEW: Custom initial state
         # 🔥 Intent Analysis Config
         enable_intent_analysis: bool = False,  # 🔥 NEW: Enable built-in intent analysis
-        intent_analysis_llm: Optional['AsyncLLMClient'] = None  # 🔥 NEW: LLM for intent analysis
+        intent_analysis_llm: Optional['AsyncLLMClient'] = None,  # 🔥 NEW: LLM for intent analysis
+        # 🔥 Redirect Feature
+        redirect_system_prompt: str = "Você é um assistente útil. Responda a pergunta do usuário de forma direta.",
+        
+        # 🔥 Strategy Config
+        contract_strategy = None,
+        synthesis_strategy = None
     ):
         """
         Initialize Async Agent Engine with HFSM architecture.
@@ -1211,6 +1331,13 @@ class AsyncAgentEngine:
         # 🔥 Intent Analysis Config
         self.enable_intent_analysis = enable_intent_analysis
         self.intent_analysis_llm = intent_analysis_llm or llm
+        
+        # 🔥 Redirect Feature
+        self.redirect_system_prompt = redirect_system_prompt
+        
+        # 🔥 Strategy Injection
+        self.contract_strategy = contract_strategy
+        self.synthesis_strategy = synthesis_strategy
         
         # 🔥 Safety Config
         self.post_router_hook = post_router_hook  # 🔥 Store hook
@@ -1292,20 +1419,55 @@ class AsyncAgentEngine:
             )
             self.states["ResearchForkState"] = self.research_fork_state
             
-            # 🔥 UPDATED: Use ForkContractState (not ForkSummaryState)
+            # 🔥 UPDATED: Use ForkContractState with Strategy
             from finitestatemachineAgent.fork_states import ForkContractState
-            self.fork_contract_state = ForkContractState(self.terminal, self.llm)
+            self.fork_contract_state = ForkContractState(
+                self.terminal, 
+                self.llm,
+                contract_strategy=self.contract_strategy
+            )
             self.states["ForkContractState"] = self.fork_contract_state
             # Backward compatibility alias
             self.states["ForkSummaryState"] = self.fork_contract_state
             
-            # 🔥 NEW: Add semantic synthesis state
+            # 🔥 NEW: Add semantic synthesis state with Strategy
             from finitestatemachineAgent.llm_synthesis_strategy import LLMSynthesisStrategy
-            synthesis_strategy = LLMSynthesisStrategy(self.llm, temperature=0.3)
-            self.synthesis_state = SemanticSynthesisState(self.reasoning, synthesis_strategy)
+            synthesis_strat = self.synthesis_strategy or LLMSynthesisStrategy(self.llm, temperature=0.3)
+            
+            self.synthesis_state = SemanticSynthesisState(self.reasoning, synthesis_strat)
             self.states["SemanticSynthesisState"] = self.synthesis_state
             
             logger.info("✅ Parallel execution states initialized")
+
+            # 🔥 FORK OVERRIDES: Ensure forks define contracts instead of answering
+            # Redirect Validation -> Answer to ForkContract
+            self.override_transition(
+                from_state="ValidationState",
+                condition=lambda ctx, trans: ctx.memory.get("branch_id") is not None and trans.to == "AnswerState",
+                new_target="ForkContractState"
+            )
+            # Redirect Tool -> Answer to ForkContract (if skipping validation)
+            self.override_transition(
+                from_state="ToolState",
+                condition=lambda ctx, trans: ctx.memory.get("branch_id") is not None and trans.to == "AnswerState",
+                new_target="ForkContractState"
+            )
+
+        # 🔥 Standard Optional States (Intent Analysis)
+        if self.enable_intent_analysis:
+            self.intent_analysis_state = IntentAnalysisState(
+                self.policy, 
+                self.intent_analysis_llm or self.llm,
+                self.system_instruction
+            )
+            self.states["IntentAnalysisState"] = self.intent_analysis_state
+            
+        # Response Validator (Standard)
+        self.response_validator_state = ResponseValidatorState(
+            self.terminal if hasattr(self, 'terminal') else self.root, 
+            self.llm
+        )
+        self.states["ResponseValidatorState"] = self.response_validator_state
 
         # Service locator
         self.root.find_state_by_type = self._find_state_provider
@@ -1443,8 +1605,14 @@ Formato JSON OBRIGATÓRIO:
         "Ação 2: O que analisar",
         "Ação 3: Como responder"
     ],
-    "language": "Código ISO da língua (pt, en, es...)"
+    "language": "Código ISO da língua (pt, en, es...)",
+    "complexity": "simple | complex",
+    "needs_tools": true | false
 }}
+
+DEFINIÇÕES:
+- "complexity": "simple" se for uma saudação, pergunta pessoal sobre o bot ou algo trivial que NÃO requer raciocínio profundo ou pesquisa. "complex" caso contrário.
+- "needs_tools": true se a resposta depender de informações externas (pesquisa, banco de dados, cálculos). false se puder ser respondido com conhecimento geral ou conversa fiada.
 
 IMPORTANTE:
 - "required_context" deve estar vazio se o histórico não for relevante para a pergunta ATUAL.
@@ -1527,25 +1695,32 @@ IMPORTANTE:
             await context.set_memory("intent_analyzed", True)
             await context.set_memory("user_language", "pt")  # Default
 
-    async def dispatch(self, context: AsyncExecutionContext):
+    async def dispatch(self, context: AsyncExecutionContext, initial_state_name: str = None):
         """
         Async state machine dispatch loop with transition resolution.
         """
         # Check if in fork
         is_fork = await context.get_memory("branch_id") is not None
         
-        # 🔥 Run intent analysis ONLY in main flow (not in forks)
-        if self.enable_intent_analysis and not is_fork:
+        current_state = None
+
+        # 🔥 0. Forced initial state via arg
+        if initial_state_name and initial_state_name in self.states:
+            current_state = self.states[initial_state_name]
+            logger.info(f"🎯 [Engine] Dispatch starting from forced state: {initial_state_name}")
+
+        # 🔥 1. Start from valid global initial state (if not forced)
+        elif self.initial_state_name and self.initial_state_name in self.states and not is_fork:
+            current_state = self.states[self.initial_state_name]
+            logger.info(f"🎯 [Engine] Starting from custom global initial state: {self.initial_state_name}")
+            # Check if already analyzed to prevent loops
             intent_analyzed = await context.get_memory("intent_analyzed")
             if not intent_analyzed:
-                logger.info("🎯 [Engine] Running built-in intent analysis...")
-                await self._analyze_intent(context)
-        
-        # 🔥 Start from custom initial state ONLY if not in a fork
-        # Forks always start from RouterState
-        if self.initial_state_name and self.initial_state_name in self.states and not is_fork:
-            current_state = self.states[self.initial_state_name]
-            logger.info(f"🎯 [Engine] Starting from custom initial state: {self.initial_state_name}")
+                current_state = self.states["IntentAnalysisState"]
+                logger.info("🎯 [Engine] Starting with Intent Analysis")
+            else:
+                current_state = self.router_state
+                
         else:
             current_state = self.router_state
 
@@ -1625,3 +1800,32 @@ IMPORTANTE:
         if stream:
             async for token in stream:
                 yield token
+
+# =================================================================================================
+# To be implemented
+# =================================================================================================
+
+class ResponseValidatorState(AsyncHierarchicalState):
+    """
+    Standard state for validating final answers.
+    """
+    def __init__(self, parent, llm):
+        super().__init__(parent)
+        self.llm = llm
+        
+    async def handle(self, context: AsyncExecutionContext):
+        return Transition(to="TerminalState", reason="Validator placeholder passed")
+
+
+class HumanFeedbackState(AsyncHierarchicalState):
+    """
+    State for Human-in-the-Loop interaction.
+    Pauses execution to request user feedback/approval before proceeding.
+    """
+    async def handle(self, context: AsyncExecutionContext):
+        # TODO: Implement pause/resume mechanism via WebSocket or API callback
+        # Logic:
+        # 1. Send "Review Request" event to Client
+        # 2. Save state snapshot
+        # 3. Wait for external trigger/API call with approval
+        return Transition(to="AnswerState", reason="Human feedback passed")

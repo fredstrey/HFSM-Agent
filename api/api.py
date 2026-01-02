@@ -21,8 +21,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from api_schemas import ChatRequest, ChatResponse, ProcessPDFRequest, ProcessPDFResponse
 from embedding_manager.embedding_manager import EmbeddingManager
-from agents.rag_agent_hfsm import RAGAgentFSMStreaming
+from agents.finance_ai import FinanceAI
 from pdf_pipeline.pdf_processor import PDFProcessor
+import agents.finance_ai_tools as finance_ai_tools
 
 # Initialize FastAPI
 app = FastAPI(
@@ -60,6 +61,10 @@ except Exception as e:
 # PDF Processor
 pdf_processor = PDFProcessor(embedding_manager)
 print("\n✅ PDF Processor initialized!")
+
+# Initialize Finance AI tools with embedding manager
+finance_ai_tools.initialize_finance_ai_tools(embedding_manager)
+print("✅ Finance AI tools initialized!")
 
 
 @app.get("/")
@@ -126,19 +131,17 @@ async def stream_chat(request: ChatRequest):
                 chat_history = history_dicts[-6:]  # last 3 turns
 
             # -----------------------------
-            # 2. Initialize ASYNC agent
+            # 2. Initialize Finance.AI agent
             # -----------------------------
-            from agents.rag_agent_hfsm_async import AsyncRAGAgentFSM
-            
-            rag_agent = AsyncRAGAgentFSM(
-                embedding_manager=embedding_manager,
+            finance_ai = FinanceAI(
+                llm_provider="openrouter",
                 model="xiaomi/mimo-v2-flash:free"
             )
 
             # -----------------------------
             # 3. Stream tokens (fully async!)
             # -----------------------------
-            async for token in rag_agent.run_stream(
+            async for token in finance_ai.stream(
                 query=request.message,
                 chat_history=chat_history
             ):
@@ -150,17 +153,30 @@ async def stream_chat(request: ChatRequest):
             # -----------------------------
             # 4. Final metadata event
             # -----------------------------
+            # Collect metadata from agent's last execution context
+            if hasattr(finance_ai.agent, 'last_context'):
+                ctx = finance_ai.agent.last_context
+                
+                # Get all metadata (already populated by agent)
+                token_usage = await ctx.get_memory("total_usage", {})
+                total_requests = await ctx.get_memory("total_requests", 0)
+                sources_used = await ctx.get_memory("sources_used", [])
+                confidence = await ctx.get_memory("confidence", "-")
+            else:
+                token_usage = {}
+                total_requests = 0
+                sources_used = []
+                confidence = "-"
+            
             yield json.dumps({
                 "type": "metadata",
                 "content": "",
                 "metadata": {
                     "conversation_id": conversation_id,
-                    "sources_used": await rag_agent.context.get_memory("sources_used") if hasattr(rag_agent, 'context') else [],
-                    "confidence": await rag_agent.context.get_memory("confidence") if hasattr(rag_agent, 'context') else None,
-                    "usage": await rag_agent.context.get_memory("total_usage") if hasattr(rag_agent, 'context') else {},
-                    # 🔥 NEW: Total requests
-                    "total_requests": await rag_agent.context.get_memory("total_requests") if hasattr(rag_agent, 'context') else 0,
-                    "context": rag_agent.context.snapshot() if hasattr(rag_agent, 'context') else {}
+                    "sources_used": sources_used,
+                    "confidence": confidence,
+                    "usage": token_usage,
+                    "total_requests": total_requests
                 }
             })
 

@@ -218,7 +218,7 @@ class AsyncOpenRouterProvider:
                         except json.JSONDecodeError:
                             continue
         
-        # Yield usage as a special marker (dict instead of string)
+        # Yield usage with special marker for AnswerState to capture
+
         if usage_data:
             yield {"__usage__": usage_data}
-

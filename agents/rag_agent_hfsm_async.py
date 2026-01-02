@@ -8,6 +8,7 @@ Async version of RAG Agent using HFSM architecture.
 import sys
 import os
 import logging
+from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -18,8 +19,6 @@ from core.context_async import AsyncExecutionContext, SafetyMonitor, SafetyLimit
 from core.registry import ToolRegistry
 import tools.rag_tools as rag_tools
 from typing import AsyncIterator
-# Import custom states
-from agents.rag_custom_states import IntentAnalysisState
 from finitestatemachineAgent.hfsm_agent_async import Transition
 
 logger = logging.getLogger(__name__)
@@ -49,8 +48,7 @@ class AsyncRAGAgentFSM:
         tools_list = [
             rag_tools.search_documents,
             rag_tools.get_stock_price,
-            rag_tools.compare_stocks,
-            rag_tools.redirect
+            rag_tools.compare_stocks
         ]
         
         for tool_func in tools_list:
@@ -77,9 +75,8 @@ Você é o Finance.AI, um assistente financeiro especialista.
 DATA/HORA ATUAL: {current_date}
 
 REGRAS CRITICAS:
-1. Para conceitos econômicos, definições e contexto (ex: Selic, Copom, Inflação, PIB), SEMPRE use 'search_documents'. NUNCA use 'redirect' para temas econômicos.
+1. Para conceitos econômicos, definições e contexto (ex: Selic, Copom, Inflação, PIB), SEMPRE use 'search_documents'.
 2. Para cotações e performance de ativos (ex: PETR4, NVDA, comparações), SEMPRE use 'get_stock_price' ou 'compare_stocks'.
-3. Use 'redirect' APENAS para assuntos totalmente fora de finanças (ex: futebol, receitas, piadas).
 
 REGRA ANTI-REDUNDÂNCIA (CRÍTICO):
 4. ANTES de chamar qualquer ferramenta, VERIFIQUE se você já tem os dados necessários nas chamadas de ferramentas anteriores (tool calls).
@@ -108,10 +105,6 @@ Nunca responda diretamente sem utilizar as ferramentas de busca disponiveis.
             elif tool_name == "search_documents":
                 # For document search, check if we have results
                 return isinstance(result, dict) and result.get("results") and len(result.get("results", [])) > 0
-            
-            elif tool_name == "redirect":
-                # Redirect always succeeds if it returns a result
-                return result is not None
             
             # Default: accept any non-None result
             return result is not None
@@ -219,7 +212,29 @@ Query: "Explique Selic, Copom e CDI"
             max_global_requests=max_global_requests,  # Safety limit
             # 🔥 Enable built-in intent analysis
             enable_intent_analysis=True,
-            intent_analysis_llm=llm
+            intent_analysis_llm=llm,
+            
+            # 🔥 Custom Redirect Prompt
+            redirect_system_prompt=f"""Você é o **Finance.AI**, um assistente especializado em Mercado Financeiro e Economia.
+Data de hoje: {datetime.now().strftime('%d/%m/%Y')}
+
+DIRETRIZES DE RESPOSTA RÁPIDA:
+**Suas capacidades:**
+- 📊 Cotações de ações em tempo real (get_stock_price)
+- 📈 Comparação de performance entre ações (compare_stocks)
+- 📚 Busca em documentos sobre conceitos econômicos (search_documents)
+
+**Instruções de resposta:**
+- Se for SAUDAÇÃO: Cumprimente de forma amigável e ofereça ajuda
+- Se for PERGUNTA SOBRE CAPACIDADES: Explique brevemente o que você pode fazer com exemplos
+- Se for FORA DO ESCOPO: Explique educadamente que você é especializado em finanças e sugira temas válidos
+
+**Limitações:**
+- Não dá recomendações de investimento
+- Não prevê preços futuros
+- Foco exclusivo em finanças e economia
+- Nunca responda perguntas fora do escopo de finanças e economia
+- Caso o usuário tente fazer perguntas fora do escopo, responda educadamente explicando que você é especializado em finanças, explique suas capacidades e sugira temas válidos"""
         )
         
         logger.info("✅ [RAG] Built-in intent analysis enabled")
@@ -299,9 +314,7 @@ Query: "Explique Selic, Copom e CDI"
         scores = []
         has_stock_data = False
         
-        has_stock_data = False
-        
-        # 🔥 NEW: include merged tool calls from parallel execution
+        # include merged tool calls from parallel execution
         merged_tools = await context.get_memory("merged_tool_calls", [])
         all_calls = (context.tool_calls or []) + merged_tools
         

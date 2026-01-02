@@ -96,11 +96,16 @@ Present information as if you researched it directly."""
         if request.constraints:
             constraints_text = f"\n\nConstraints:\n" + "\n".join(f"- {c}" for c in request.constraints)
         
+        # Combine into single user message
+        user_content = (
+            f"User's question: {request.task_description}\n\n"
+            f"Research findings:\n\n{outputs_text}{constraints_text}\n\n"
+            f"Synthesize these findings into one coherent answer in {request.output_format} format:"
+        )
+        
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"User's question: {request.task_description}"},
-            {"role": "user", "content": f"Research findings:\n\n{outputs_text}{constraints_text}"},
-            {"role": "user", "content": f"Synthesize these findings into one coherent answer in {request.output_format} format:"}
+            {"role": "user", "content": user_content}
         ]
         
         # Call LLM
@@ -131,3 +136,27 @@ Present information as if you researched it directly."""
         except Exception as e:
             logger.error(f"❌ [LLMSynthesis] Failed: {e}")
             raise ValueError(f"Synthesis failed: {e}")
+
+
+class ConcatenationSynthesisStrategy(SynthesisStrategy):
+    """
+    Simple concatenation strategy.
+    Just appends results without LLM processing.
+    Example: Result 1: ..., Result 2: ...
+    """
+    
+    async def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+        logger.info(f"🧬 [ConcatSynthesis] Appending {len(request.fork_outputs)} outputs")
+        
+        answer = f"**Synthesis Result for:** {request.task_description}\n\n"
+        
+        for i, output in enumerate(request.fork_outputs):
+             fork_text = str(output).strip()
+             answer += f"### Result {i+1}\n{fork_text}\n\n"
+             
+        return SynthesisResult(
+            answer=answer,
+            confidence=1.0,
+            gaps=[],
+            inconsistencies=[]
+        )
