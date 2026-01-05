@@ -218,11 +218,16 @@ class RouterState(AsyncHierarchicalState):
     async def handle(self, context: AsyncExecutionContext):
         self.logger.info("🧠 [Router] Thinking...")
         
+        # 🔥 CRITICAL: Ensure IntentAnalysis runs BEFORE parallel planning check
+        # This allows intent analysis to enhance the query before planning
+        intent_analyzed = await context.get_memory("intent_analyzed", False)
+        is_root = context.parent is None
+
+        
         # Research context is injected ONLY in AnswerState for better control
-        # - Check for parallel planning BEFORE calling LLM
+        # - Check for parallel planning AFTER IntentAnalysis
         # Only if enabled, not checked yet, AND IS ROOT CONTEXT (no parents allowed to fork)
         parallel_checked = await context.get_memory("parallel_checked", False)
-        is_root = context.parent is None
         
         if (self.enable_parallel and not parallel_checked and is_root):
             
@@ -431,8 +436,9 @@ class ValidationState(AsyncHierarchicalState):
                 self.logger.info(f"🌿 [Validation] Fork context detected (branch: {branch_id}), proceeding to contract extraction")
                 return Transition(to="ForkContractState", reason="Validation passed in fork")
             else:
-                # Normal flow - go to AnswerState
-                return Transition(to="AnswerState", reason="Validation passed")
+                # Normal flow - return to RouterState to allow more searches
+                self.logger.info("🔄 [Validation] Returning to RouterState for potential additional searches")
+                return Transition(to="RouterState", reason="Validation passed")
         else:
             self.logger.warning("⚠️ [Validation] Data is invalid")
             return Transition(to="RetryState", reason="Validation failed", metadata={"tool": tool_name})
@@ -988,10 +994,23 @@ class SemanticSynthesisState(AsyncHierarchicalState):
             self.logger.warning("⚠️ [Synthesis] No outputs to synthesize")
             return Transition(to="RouterState", reason="Empty research context")
         
+        # Get metadata for better synthesis
+        user_language = await context.get_memory("user_language", "pt")
+        todo_list = await context.get_memory("todo_list", [])
+        
+        # Build constraints
+        constraints = []
+        constraints.append(f"Output Language: {user_language.upper()}")
+        
+        if todo_list:
+            constraints.append("Must address the following points if data allows:")
+            for task in todo_list:
+                constraints.append(f"- {task}")
+
         request = SynthesisRequest(
             task_description=context.user_query,
             fork_outputs=fork_outputs,
-            constraints=[],
+            constraints=constraints,
             output_format="markdown"
         )
         
@@ -1017,13 +1036,13 @@ class SemanticSynthesisState(AsyncHierarchicalState):
             
             self.logger.info(f"✅ [Synthesis] Consolidated {len(fork_outputs)} outputs into {len(result.answer)} chars")
             
-            return Transition(to="RouterState", reason="Synthesis complete")
+            return Transition(to="AnswerState", reason="Synthesis complete")
             
         except Exception as e:
             self.logger.error(f"❌ [Synthesis] Failed: {e}")
             # Fallback: skip synthesis, use raw contracts
             self.logger.info("🔄 [Synthesis] Falling back to raw contracts")
-            return Transition(to="RouterState", reason="Synthesis failed, using raw contracts")
+            return Transition(to="AnswerState", reason="Synthesis failed, using raw contracts")
 
 
 class AnswerState(TerminalState):
@@ -1050,69 +1069,102 @@ class AnswerState(TerminalState):
 
         messages = [{"role": "system", "content": system_instruction}]
 
-        # Add history
-        history = await context.get_memory("chat_history", [])
-        if history:
-            messages.extend(history)
+        # Get intent analysis metadata (Available for both flows)
+        user_language = await context.get_memory("user_language")  # No default here to check if it exists
+        todo_list = await context.get_memory("todo_list", [])
 
-        messages.append({"role": "user", "content": context.user_query})
+        # Determine language instruction
+        if user_language:
+            lang_instruction = f"You MUST answer in {user_language.upper()}."
+        else:
+            lang_instruction = "You MUST answer in the SAME LANGUAGE as the user's request."
 
-        # Add tool results if any
-        if context.tool_calls:
-            for call in context.tool_calls:
-                if call.get("result"):
-                    tool_call_id = f"call_{call['tool_name']}_{call.get('iteration', 0)}"
-                    messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": tool_call_id,
-                            "type": "function",
-                            "function": {
-                                "name": call["tool_name"],
-                                "arguments": json.dumps(call["arguments"])
-                            }
-                        }]
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "name": call["tool_name"],
-                        "content": str(call.get("result", ""))
-                    })
-
-            messages.append({
-                "role": "system",
-                "content": "Based on the tool results, provide a best-effort answer. If the information is insufficient or invalid, explain clearly what is missing. Do NOT call more tools."
-            })
-
-        # 1. Inject Context (Synthesis FIRST, then Contracts)
+        # Check if we have synthesis result
         synthesis_result = await context.get_memory("synthesis_result")
         
         if synthesis_result and synthesis_result.get("answer"):
+            # SIMPLIFIED FLOW: Only synthesis + original query
+            self.logger.info(f"📚 [Answer] Using synthesis-only mode ({len(synthesis_result['answer'])} chars)")
+            
+            # Just add the user query
+            messages.append({"role": "user", "content": context.user_query})
+            
+            # Build todo list text if available
+            todo_text = ""
+            if todo_list:
+                todo_text = "\n\n**Key points to address:**\n"
+                for i, task in enumerate(todo_list, 1):
+                    todo_text += f"{i}. {task}\n"
+            
             # Inject synthesized context
-            self.logger.info(f"📚 [Answer] Injecting synthesized context ({len(synthesis_result['answer'])} chars)")
-            self.logger.info(f"🔍 [Answer] Synthesis preview: {synthesis_result['answer'][:100]}...")
             messages.append({
                 "role": "system",
                 "content": f"""Use the following synthesized research findings to answer the user's question.
 
+USER'S QUESTION:
+{context.user_query}
+
 CRITICAL INSTRUCTIONS:
-1. **LANGUAGE CONSISTENCY**: You MUST answer in the SAME LANGUAGE as the user's query.
-   - If user asks in Portuguese -> Answer in Portuguese
-   - If user asks in English -> Answer in English
-   - If user asks in Spanish -> Answer in Spanish
-   - DO NOT translate technical terms if they are standard in the field, but explain them if needed.
+1. **LANGUAGE**: {lang_instruction}
+   - DO NOT translate technical terms if they are standard in the field.
 
 2. **Use the findings**: The provided text is a synthesis of multiple sources. Use it as the primary source of truth.
-3. **Natural presentation**: Present the answer naturally to the user.
+3. **Natural presentation**: Present the answer naturally to the user.{todo_text}
 
 SYNTHESIZED FINDINGS:
 {synthesis_result['answer']}"""
             })
             
         else:
-            # Fallback to research context (contracts)
+            # FALLBACK: Original complex flow with history and tool calls
+            self.logger.info("📚 [Answer] Using fallback mode (no synthesis)")
+            
+            # Add history
+            history = await context.get_memory("chat_history", [])
+            if history:
+                messages.extend(history)
+
+            messages.append({"role": "user", "content": context.user_query})
+
+            # Add tool results if any
+            if context.tool_calls:
+                for call in context.tool_calls:
+                    if call.get("result"):
+                        tool_call_id = f"call_{call['tool_name']}_{call.get('iteration', 0)}"
+                        messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": call["tool_name"],
+                                    "arguments": json.dumps(call["arguments"])
+                                }
+                            }]
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "name": call["tool_name"],
+                            "content": str(call.get("result", ""))
+                        })
+
+            # Build fallback prompt
+            fallback_instruction = f"Based on the tool results, provide a COMPREHENSIVE and FINAL answer to the user's request. {lang_instruction} Do NOT provide an introduction saying you will explain; JUST EXPLAIN directly and professionally. Act as if this is the final report. Do NOT call more tools."
+            
+            if todo_list:
+                fallback_instruction += "\n\nKey points to address:\n"
+                for i, task in enumerate(todo_list, 1):
+                    fallback_instruction += f"{i}. {task}\n"
+
+            messages.append({
+                "role": "system",
+                "content": fallback_instruction
+            })
+
+
+        # Fallback to research context (contracts) if no synthesis
             research_context = await context.get_memory("research_context")
             if research_context and isinstance(research_context, dict):
                 # Check if it's a MergedContract (has 'resolved' and 'conflicts' keys)
@@ -1294,6 +1346,7 @@ class IntentAnalysisState(AsyncHierarchicalState):
 
     async def handle(self, context: AsyncExecutionContext):
         self.logger.info("🧠 [IntentAnalysis] Analyzing user intent...")
+        self.logger.info(f"🔍 [IntentAnalysis] DEBUG: Query = '{context.user_query}'")
         
         # Check if already analyzed to prevent loops
         if await context.get_memory("intent_analyzed"):
@@ -1457,11 +1510,16 @@ IMPORTANTE:
                 context.user_query = analysis.get("enhanced_query")
                 self.logger.info(f"✨ [IntentAnalysis] Query enhanced: {context.user_query}")
             
-            # Log results
+            # Log results with full JSON
+            self.logger.info("🔍 [IntentAnalysis] DEBUG: About to log detailed analysis...")
             self.logger.info(f"✅ [IntentAnalysis] Intent: {analysis.get('intent', 'unknown')}")
+            self.logger.info(f"📊 [IntentAnalysis] Complexity: {analysis.get('complexity', 'unknown')}")
+            self.logger.info(f"🔧 [IntentAnalysis] Needs tools: {analysis.get('needs_tools', False)}")
+            self.logger.info(f"🌍 [IntentAnalysis] Language: {analysis.get('language', 'unknown')}")
             self.logger.info(f"📝 [IntentAnalysis] Todo list ({len(analysis.get('todo_list', []))} items):")
             for i, task in enumerate(analysis.get('todo_list', []), 1):
                 self.logger.info(f"   {i}. {task}")
+            self.logger.info(f"📋 [IntentAnalysis] Full analysis: {json.dumps(analysis, ensure_ascii=False, indent=2)}")
                 
             # Redirect Check
             complexity = analysis.get("complexity", "complex")
@@ -1734,9 +1792,12 @@ class AsyncAgentEngine:
         if self.enable_intent_analysis:
             self.intent_analysis_state = IntentAnalysisState(
                 self.policy, 
-                self.intent_analysis_llm or self.llm,"" 
+                self.intent_analysis_llm or self.llm,
+                self.system_instruction  # Pass system instruction
             )
             self.states["IntentAnalysisState"] = self.intent_analysis_state
+            # Inject logger
+            self.intent_analysis_state.logger = self.logger
             
         # Response Validator (Standard)
         self.response_validator_state = ResponseValidatorState(

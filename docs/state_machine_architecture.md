@@ -55,7 +55,8 @@ graph TD
 *   **Responsabilidade**:
     *   Identificar complexidade (`simple` vs `complex`).
     *   Identificar necessidade de tools (`needs_tools`).
-    *   Gerar Todo List inicial.
+    *   Gerar **Todo List** estruturado.
+    *   Detectar **Idioma do Usuário** (`user_language`).
 *   **Transições**:
     *   -> `AnswerState`: Se for query simples (Fast-Track).
     *   -> `RouterState`: Fluxo normal.
@@ -72,6 +73,9 @@ graph TD
 #### `RouterState`
 *   **Função**: O "cérebro" central.
 *   **Responsabilidade**: Decidir o próximo passo com base no histórico e ferramentas disponíveis.
+*   **Logica Otimizada**:
+    *   Prioriza `IntentAnalysis` se ativado.
+    *   Tratativa robusta para quando `IntentAnalysis` está desativado (evita loops e crashes).
 *   **Transições**:
     *   -> `ToolState`: Executar ferramenta.
     *   -> `ParallelPlanningState`: Se `enable_parallel_planning=True` e detectar necessidade de pesquisa profunda.
@@ -145,13 +149,22 @@ graph TD
 #### `SemanticSynthesisState`
 *   **Função**: Redator Final (Integrador).
 *   **Responsabilidade**: Pegar os dados fragmentados dos forks e escrever uma resposta coesa e fluida.
+*   **Features Avançadas**:
+    *   Recebe `user_language` e `todo_list` como constraints.
+    *   Gera métricas de confiança e gaps.
 *   **Transições**:
-    *   -> `AnswerState`: Entregar o texto final.
+    *   -> `AnswerState`: Entregar o texto final (Synthesis Result).
 
 #### `AnswerState`
-*   **Função**: Comunicador.
+*   **Função**: Comunicador Final.
 *   **Responsabilidade**: Gerar a resposta final para o usuário (em Stream ou Bloco).
-*   **Refinamento**: No fluxo paralelo, ele pode apenas repassar o texto da Síntese. No fluxo single, ele gera o texto final.
+*   **Flow Duplo (Dual Mode)**:
+    1.  **Synthesis Mode (Prioritário)**: Usa o texto já sintetizado pelo `SemanticSynthesisState`. Limpo e direto.
+    2.  **Fallback Mode**: Usa histórico + tool outputs brutos se a síntese falhar.
+*   **Enforcement**:
+    *   Garante resposta no idioma do usuário (`user_language`).
+    *   Exige resposta "FINAL" e "COMPRREHENSIVE" no fallback (sem enrolação/conversacional).
+    *   Verifica checklist do `todo_list`.
 *   **Transições**:
     *   -> `TerminalState`: Fim da conversa.
 

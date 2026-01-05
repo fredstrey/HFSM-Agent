@@ -77,7 +77,7 @@ FERRAMENTAS DISPONÍVEIS:
 
 **ESTRATÉGIA DE BUSCA:**
 - Para questões amplas: Divida em sub-tópicos e busque cada um separadamente
-- Para comparações: Busque cada elemento comparado individualmente
+- Para comparações: Busque cada elemento comparado individualmente  
 - Para análises multi-dimensionais: Busque cada dimensão (constitucional, legal, doutrinária, jurisprudencial)
 
 DIRETRIZES DE ESTILO E TOM (JURIDIQUÊS OBRIGATÓRIO):
@@ -136,7 +136,7 @@ DIRETRIZES DE RESPOSTA RÁPIDA:
             max_retries=3,
 
             # enable forks for parallel research
-            enable_parallel_planning=False,
+            enable_parallel_planning=True,
 
             # enable planning, intent analysis and creates ToDo list for tasks
             enable_intent_analysis=True, 

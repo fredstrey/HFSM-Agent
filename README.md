@@ -83,6 +83,8 @@ stateDiagram-v2
 
 - ✅ **Intent Analysis**: Automatic query understanding with todo_list generation (NEW!)
 - ✅ **Parallel Tool Execution**: Multiple tools execute concurrently for better performance (NEW!)
+- ✅ **Smart Fallback**: Robust "Final Answer" generation even when synthesis is skipped
+- ✅ **Tool Result Filtering**: Auto-removal of low-quality/short search results (NEW!)
 - ✅ **Hierarchical States**: Organized into superstates (Reasoning, Execution, Recovery, Terminal)
 - ✅ **Context Pruning**: Automatic token management to stay within LLM limits
 - ✅ **Validation Layer**: Optional "double check" for tool outputs (configurable)
@@ -207,7 +209,7 @@ async for token in agent.run_stream("What is the Selic rate?"):
 - Gradual migration path
 - Same API interface
 
-### Intent Analysis \ud83e\udde0
+### Intent Analysis 🧠
 
 The **IntentAnalysisState** automatically analyzes user queries before routing to extract:
 
@@ -237,11 +239,11 @@ The **IntentAnalysisState** automatically analyzes user queries before routing t
 ```
 
 **Benefits:**
-- \u2705 Better query understanding
-- \u2705 Structured execution planning
-- \u2705 Automatic language detection
-- \u2705 Smart routing (simple queries skip tool execution)
-- \u2705 Enhanced context from chat history
+- ✅ Better query understanding
+- ✅ Structured execution planning
+- ✅ Automatic language detection
+- ✅ Smart routing (simple queries skip tool execution)
+- ✅ Enhanced context from chat history
 
 **Robust JSON Extraction:**
 - Handles malformed LLM responses
@@ -249,7 +251,7 @@ The **IntentAnalysisState** automatically analyzes user queries before routing t
 - Guaranteed fallback to default values
 - No crashes from "Extra data" or "Expecting value" errors
 
-### Parallel Tool Execution \u26a1
+### Parallel Tool Execution ⚡
 
 The **ToolState** executes multiple tools **concurrently** using `asyncio.gather`:
 
@@ -267,20 +269,20 @@ results = await asyncio.gather(*[tool(**args) for tool, args in tool_calls])
 ```
 
 **Performance Gains:**
-- \ud83d\ude80 3x faster for multiple tool calls
-- \ud83d\udcca Better resource utilization
-- \u23f1\ufe0f Reduced latency for I/O-bound operations
+- 🚀 3x faster for multiple tool calls
+- 📊 Better resource utilization
+- ⏱️ Reduced latency for I/O-bound operations
 
-### Legal.AI Chatbot \u2696\ufe0f
+### Legal.AI Chatbot ⚖️
 
 **Legal.AI** is a specialized legal consultant built on the HFSM framework:
 
 **Features:**
-- \ud83d\udcdc Constitutional law expertise (Constituição Federal de 1988)
-- \ud83d\udd0d Semantic search in legal documents (Qdrant)
-- \u2696\ufe0f Formal juridical language ("juridiquês")
-- \ud83d\udcda Source citations with article references
-- \ud83e\udde0 Intent analysis for legal queries
+- 📜 Constitutional law expertise (Constituição Federal de 1988)
+- 🔍 **Smart Semantic Search**: Filters low-quality/short content automatically
+- ⚖️ Formal juridical language ("juridiquês")
+- 📚 Source citations with article references
+- 🧠 Intent analysis for legal queries (Language & Todo List aware)
 
 **Persona:**
 - Uses formal legal terminology and Latin expressions
@@ -295,7 +297,7 @@ User: "Quais são os mecanismos constitucionais de controle das contas do Presid
 Legal.AI:
 1. Analyzes intent → "Buscar mecanismos de controle constitucional"
 2. Creates todo_list → ["Buscar CF/88 art. 70-75", "Analisar competências TCU", ...]
-3. Searches documents → Finds relevant constitutional articles
+3. Searches documents → Finds relevant constitutional articles (Filtering >50 chars)
 4. Generates formal legal response with citations
 ```
 

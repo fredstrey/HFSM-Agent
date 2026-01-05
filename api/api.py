@@ -49,8 +49,9 @@ print("🚀 Initializing components...")
 embedding_manager = EmbeddingManager(
     embedding_model="qwen3-embedding:0.6b",
     qdrant_url=os.getenv("QDRANT_URL", "http://localhost:6333"),
-    collection_name="rag_api",
-    filter="Constituição da República Federativa do Brasil"
+    collection_name="hybrid",
+    filter="Constituição da República Federativa do Brasil",
+    enable_rerank=False  # Disable reranking to save memory/cpu
 )
 
 # Initialize collection if necessary

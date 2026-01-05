@@ -407,35 +407,37 @@ def handle(self, context: ExecutionContext):
 
 **Purpose**: Generate final answer and stream to user.
 
-**Input**: All tool results + user query  
+**Input**: 
+1. **Synthesis Result** (if Parallel Planning was successful)
+2. **Fallback**: All tool results + user query (if Synthesis failed or Single Thread)
+
 **Output**: Token generator (streaming)
 
-**Implementation**:
+**Implementation Logic**:
 ```python
 def handle(self, context: ExecutionContext):
-    # Build final prompt with ALL tool results (unpruned)
-    messages = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": context.user_query}
-    ]
+    # 1. Check for Synthesis (Preferred)
+    synthesis = context.get_memory("synthesis_result")
+    if synthesis:
+        # Stream the pre-synthesized answer directly
+        messages = [...] # Use synthesis['answer']
     
-    # Add ALL tool calls (not pruned view)
-    for call in context.tool_calls:
-        messages.append({
-            "role": "assistant",
-            "tool_calls": [...]
-        })
-        messages.append({
-            "role": "tool",
-            "content": str(call["result"])
-        })
+    # 2. Fallback Mode
+    else:
+        # Build prompt with ALL tool results + history
+        # ENFORCEMENT: "You MUST answer in {user_language}"
+        # ENFORCEMENT: "Provide a FINAL and COMPREHENSIVE answer"
+        messages = [...]
     
     # Stream response
     self.generator = self.llm.chat_stream(messages)
     return self  # Terminal state
 ```
 
-**Streaming**: Uses `chat_stream` to yield tokens in real-time.
+**Key Improvements**:
+- **Dual Mode**: Seamlessly handles synthesized parallel research and standard tool usage.
+- **Language Enforcement**: Guaranteed adherence to user language (pt/en/etc).
+- **Finality**: Strong prompts prevent "I will check..." intermediate responses in fallback mode.
 
 ### 3.6 FailState (Terminal - Failure)
 
@@ -524,6 +526,22 @@ def dispatch(self, state, context):
 ```
 
 **Default**: 10 iterations (configurable).
+
+### 4.5 Smart Semantic Search 🔍
+
+The **Legal.AI** agent implements advanced filtering to ensure high-quality RAG results:
+
+**1. Candidate Expansion**: 
+Fetches 3x-4x more results than requested (`top_k=20+`) from the vector database to create a robust candidate pool.
+
+**2. Quality Filtering**:
+Automatically discards results with:
+- Less than 50 characters (titles, empty fragments)
+- Low hybrid scores (if below threshold)
+
+**3. Hard Limits**:
+- Enforces strict `top_k=5` return limit to the LLM to prevents context flooding.
+- Re-sorts filtered results by score to ensure relevance.
 
 ---
 

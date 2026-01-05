@@ -118,10 +118,10 @@ Query: "O que a Constituição diz sobre liberdade de expressão?"
 
 async def enforce_tool_usage(context, transition):
     """
-    Finance.AI-specific hook: Reject direct answers, force tool usage.
+    Legal.AI-specific hook: Reject direct answers, force tool usage.
     
-    This keeps the engine domain-agnostic while allowing Finance.AI
-    to enforce its own rules about always using tools for financial data.
+    This keeps the engine domain-agnostic while allowing Legal.AI
+    to enforce its own rules about always using tools for Legal data.
     
     Args:
         context: Execution context
@@ -142,21 +142,29 @@ async def enforce_tool_usage(context, transition):
     
     # Skip enforcement for simple queries that don't need tools
     if complexity == "simple" and not needs_tools:
-        logger.info("🚀 [Finance.AI] Allowing direct answer for simple query")
+        logger.info("🚀 [Legal.AI] Allowing direct answer for simple query")
         return None
     
     if transition.to == "AnswerState" and transition.reason == "Direct answer generation":
-        # LLM tried to answer directly without tools - unacceptable for Finance.AI
+        # Check if tools were already used
+        tool_count = len(context.tool_calls) if hasattr(context, 'tool_calls') and context.tool_calls else 0
+        
+        if tool_count > 0:
+            # Tools were used, allow answer
+            logger.info(f"✅ [Legal.AI] Allowing answer after {tool_count} tool call(s)")
+            return None
+        
+        # LLM tried to answer directly without tools - unacceptable for Legal.AI
         retry_count = await context.get_memory("rag_tool_retry", 0)
         
         if retry_count < 2:
             await context.set_memory("rag_tool_retry", retry_count + 1)
-            logger.info(f"🔄 [Finance.AI] Forcing tool usage (attempt {retry_count + 1}/2)")
+            logger.info(f"🔄 [Legal.AI] Forcing tool usage (attempt {retry_count + 1}/2)")
             
             # Override transition to retry
-            return Transition(to="RetryState", reason="Finance.AI requires tool usage")
+            return Transition(to="RetryState", reason="Legal.AI requires tool usage")
         else:
-            logger.error("❌ [Finance.AI] LLM refusing to use tools after retries")
+            logger.error("❌ [Legal.AI] LLM refusing to use tools after retries")
             # Let it fail to RetryState
             return Transition(to="RetryState", reason="Tool usage required")
     
@@ -171,7 +179,7 @@ async def extract_metadata(context):
     """
     Extract sources_used and confidence from tool results.
     
-    This is Finance.AI-specific logic for metadata extraction.
+    This is Legal.AI-specific logic for metadata extraction.
     Should be called after answer generation to populate metadata.
     
     Args:
@@ -231,6 +239,14 @@ Your job:
 2. Extract VERIFIABLE LEGAL PROVISIONS (Articles, Laws) and JURISPRUDENCE.
 3. Extract legal claims/arguments supported by these documents.
 
+# EXTRACTION RULES
+- KEY: Use dot notation (e.g., "constituicao.art128.requisitos").
+- VALUE: Must include the SUBJECT, the ACTION, and the PREREQUISITE. 
+  * WRONG: "President appoints the PGR."
+  * RIGHT: "President appoints the PGR FROM THE CAREER, after Senate approval by absolute majority (Art. 128, §1º)."
+- EVIDENCE: Link to the specific chunk/source.
+
+
 Output ONLY valid JSON in this exact format:
 {
   "claims": [
@@ -242,7 +258,7 @@ Output ONLY valid JSON in this exact format:
     },
     {
         "key": "constituicao.principio", 
-        "value": "Princípio da Dignidade da Pessoa Humana (Art. 1º, III, CF/88)...", 
+        "value": "Princípio da Dignidade da Pessoa Humana (Art. 1º, III, CF/88) descreve...", 
         "evidence": [{"type": "retrieved", "source": "tool:search_documents"}], 
         "confidence": 0.95
     },
@@ -254,7 +270,7 @@ Output ONLY valid JSON in this exact format:
     },
     {
         "key": "jurisprudencia.conteudo", 
-        "value": "Súmula X do STJ: texto...", 
+        "value": "Súmula X do STJ: afirma que...", 
         "evidence": [{"type": "retrieved", "source": "tool:search_documents"}], 
         "confidence": 0.9
     },

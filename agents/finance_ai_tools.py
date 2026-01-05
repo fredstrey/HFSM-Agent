@@ -91,7 +91,7 @@ def search_documents(query: str) -> Dict[str, Any]:
         chunks = [
             {
                 "content": r["content"],
-                "score": r["score"],
+                "score": r["hybrid_score"],
                 "metadata": r["metadata"]
             }
             for r in results
